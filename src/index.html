@@ -346,9 +346,10 @@
 
                 <div class="breaker-grid" style="margin-top:.8rem">
                     <div class="breaker-item"><div class="bl">Energia</div><div class="bv"><span id="brEnergy">—</span> kWh</div></div>
-                    <div class="breaker-item"><div class="bl">Corrente A</div><div class="bv"><span id="brPhases">—</span> mA</div></div>
+                    <div class="breaker-item"><div class="bl">Tensão</div><div class="bv"><span id="brVoltage">—</span> V</div></div>
+                    <div class="breaker-item"><div class="bl">Corrente</div><div class="bv"><span id="brCurrent">—</span> A</div></div>
+                    <div class="breaker-item"><div class="bl">Potência</div><div class="bv"><span id="brPower">—</span> W</div></div>
                     <div class="breaker-item"><div class="bl">Fault</div><div class="bv"><span id="brFault">0</span></div></div>
-                    <div class="breaker-item"><div class="bl">Temp</div><div class="bv"><span id="brTemp">—</span>°C</div></div>
                 </div>
                 <div class="car-info-bar">
                     <div class="cib-item"><span>Bateria:</span> <strong id="cibBattery">12.9 kWh</strong></div>
@@ -603,9 +604,10 @@ function updateUI(data) {
     // ── Breaker info ──
     if (br) {
         document.getElementById('brEnergy').textContent = (br.energy_kwh ?? 0).toFixed(2);
-        document.getElementById('brPhases').textContent = (br.phase_a ?? 0).toFixed(0);
+        document.getElementById('brVoltage').textContent = (br.voltage_v ?? 0).toFixed(1);
+        document.getElementById('brCurrent').textContent = (br.current_a ?? 0).toFixed(2);
+        document.getElementById('brPower').textContent = (br.power_w ?? 0).toFixed(0);
         document.getElementById('brFault').textContent = br.fault_code ?? 0;
-        document.getElementById('brTemp').textContent = (br.temperature !== undefined && br.temperature !== null) ? br.temperature : '—';
         // Color the fault badge
         const faultEl = document.getElementById('brFault');
         if (br.fault_code && br.fault_code !== 0) {

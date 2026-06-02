@@ -254,20 +254,68 @@ def read_fase1(d):
         "energy": round(e_raw / 1000, 4),
     }
 
+_last_valid_energy_wh = 0  # cache for DPS 1 communication errors
+
+
 def read_breaker(d):
+    """
+    Read breaker status including voltage, current, power from DPS 6.
+
+    DPS layout (protocol 4, base64-encoded in DPS 6):
+      bytes 0-1: voltage in 0.1V (big-endian uint16, divide by 10 for V)
+      bytes 3-4: current in mA   (big-endian uint16, divide by 1000 for A)
+      bytes 5-6: (not reliable for power — always reads ~10)
+      bytes 7-8: (fluctuating — purpose unclear)
+
+    DPS 1: cumulative energy counter in Wh (sometimes returns 0 on comms error)
+    DPS 9: fault bitmap
+    DPS 11: prepay switch
+    DPS 13: balance
+    DPS 16: breaker switch
+    DPS 101-104: alarm thresholds (overvoltage V, undervoltage V, temp °C, leakage mA)
+    """
+    import base64 as _b64
+
+    global _last_valid_energy_wh
     dps = d.status().get("dps", {})
+    energy_wh = _to_num(dps.get("1", 0))
+    # Fallback: DPS 1 sometimes returns 0 on comms error
+    if energy_wh > 0:
+        _last_valid_energy_wh = energy_wh
+    else:
+        energy_wh = _last_valid_energy_wh
+
+    # Read voltage & current from DPS 6 (updatedps returns protocol 4 data)
+    voltage_v = 0.0
+    current_a = 0.0
+    try:
+        result = d.updatedps()
+        dps6_b64 = result.get("dps", {}).get("6", "")
+        if dps6_b64:
+            raw = _b64.b64decode(dps6_b64)
+            if len(raw) >= 5:
+                voltage_v = (raw[0] * 256 + raw[1]) / 10.0
+                current_a = (raw[3] * 256 + raw[4]) / 1000.0
+    except Exception:
+        pass  # fallback: voltage/current stay 0
+
+    power_w = round(voltage_v * current_a, 1)  # V × A = W
+
     return {
         "switch": bool(dps.get("16", False)),
         "prepayment": bool(dps.get("11", False)),
-        "balance_kwh": round(_to_num(dps.get("13", 0)) / 100, 2),  # scale 100 in Tuya DP
-        "energy_kwh": round(_to_num(dps.get("1", 0)) / 1000, 4),
-        "energy_wh": _to_num(dps.get("1", 0)),
+        "balance_kwh": round(_to_num(dps.get("13", 0)) / 100, 2),
+        "energy_kwh": round(energy_wh / 1000, 4) if energy_wh else 0,
+        "energy_wh": energy_wh,
         "fault_code": _to_num(dps.get("9", 0)),
-        "temperature": _to_num(dps.get("103", 0)),  # temperature in °C (per tuya-local#536)
-        "phase_a": _to_num(dps.get("101", 0)),  # mA
-        "phase_b": _to_num(dps.get("102", 0)),  # mA
-        "phase_c": _to_num(dps.get("104", 0)),  # mA
-        "leakage_ma": _to_num(dps.get("15", 0)),  # mA
+        "voltage_v": round(voltage_v, 1),
+        "current_a": round(current_a, 3),
+        "power_w": power_w,
+        # Alarm thresholds (not real-time readings)
+        "alarm_overvoltage_v": _to_num(dps.get("101", 0)),
+        "alarm_undervoltage_v": _to_num(dps.get("102", 0)),
+        "alarm_temperature_c": _to_num(dps.get("103", 0)),
+        "alarm_leakage_ma": _to_num(dps.get("104", 0)),
     }
 
 
@@ -290,8 +338,8 @@ def save_reading(f1, br):
                 br.get("energy_kwh"),
                 br.get("fault_code"),
                 br.get("balance_kwh"),
-                br.get("temperature"),
-                br.get("phase_a"), br.get("phase_b"), br.get("phase_c"),
+                br.get("alarm_temperature_c"),
+                br.get("voltage_v"), br.get("current_a"), br.get("power_w"),
             ),
         )
         conn.commit()
@@ -567,37 +615,30 @@ def db_today_stats():
             (today,)
         ).fetchone()[0]
         
-        # BREAKER: Calculate breaker consumption via POWER × TIME too
+        # BREAKER: Calculate breaker consumption via stored power readings
+        # phase_c now stores breaker_power_w (V × I from DPS 6)
         br_rows = conn.execute(
-            "SELECT timestamp, phase_a, phase_b FROM readings WHERE device='fase1' AND DATE(timestamp)=? ORDER BY timestamp",
+            "SELECT timestamp, phase_c FROM readings WHERE device='fase1' AND DATE(timestamp)=? ORDER BY timestamp",
             (today,)
         ).fetchall()
-        
-        # BREAKER: Calculate consumption via phase currents × voltage
-        # Phase currents are in mA, voltage ~127V
+
         breaker_kwh = 0.0
         if br_rows:
-            voltage = 127  # 127V system
             for i in range(1, len(br_rows)):
-                t1, pa1, pb1 = br_rows[i-1]
-                t2, pa2, pb2 = br_rows[i]
-                
-                # Skip if any value is None
-                if pa1 is None or pb1 is None or pa2 is None or pb2 is None:
+                t1, pw1 = br_rows[i-1]
+                t2, pw2 = br_rows[i]
+
+                if pw1 is None or pw2 is None:
                     continue
-                
+
                 dt1 = datetime.fromisoformat(t1)
                 dt2 = datetime.fromisoformat(t2)
                 dt_seconds = (dt2 - dt1).total_seconds()
-                
+
                 if 0 < dt_seconds < 120:
-                    # Phase currents in mA → A
-                    avg_phase_a = (pa1 + pa2) / 2 / 1000
-                    avg_phase_b = (pb1 + pb2) / 2 / 1000
-                    # Only count if phases are active (non-zero)
-                    if avg_phase_a > 0.01 or avg_phase_b > 0.01:
-                        power_w = (avg_phase_a + avg_phase_b) * voltage
-                        breaker_kwh += (power_w / 1000) * (dt_seconds / 3600)
+                    avg_power_w = (pw1 + pw2) / 2
+                    if avg_power_w > 1:
+                        breaker_kwh += (avg_power_w / 1000) * (dt_seconds / 3600)
         
         breaker_kwh = round(breaker_kwh, 4)
         
@@ -779,6 +820,7 @@ class ChargingTracker:
         self.target_soc = 80
         self.battery_kwh = 12.9
         self.last_power_w = 0.0
+        self.peak_power_w = 0.0  # peak power seen during charging (for idle detection)
         self.power_samples = []  # rolling window for average
         self.idle_started_at = None  # when power first went below threshold
         self.energy_samples = []  # (timestamp, energy_kwh) for accurate delta calc
@@ -795,6 +837,7 @@ class ChargingTracker:
             self.target_soc = target_soc
             self.battery_kwh = battery_kwh
             self.last_power_w = 0.0
+            self.peak_power_w = 0.0
             self.power_samples = []
             self.idle_started_at = None
             self.energy_samples = [(datetime.now(), start_energy_kwh)]
@@ -811,6 +854,7 @@ class ChargingTracker:
             self.start_energy_kwh = 0.0
             self.start_soc = 0
             self.last_power_w = 0.0
+            self.peak_power_w = 0.0
             self.power_samples = []
             self.idle_started_at = None
             self.energy_samples = []
@@ -819,6 +863,11 @@ class ChargingTracker:
     def update(self, current_energy_kwh, current_power_w, idle_power_w, idle_seconds_needed):
         """
         Called every poll cycle while charging. Returns the new state.
+
+        Note: current_power_w comes from the main meter (total house consumption).
+        When the car is charging, total power is ~3000W. When it stops, it drops
+        to ~500W (house baseline). Idle detection uses a relative threshold:
+        if power drops below 30% of the charging peak, the car stopped accepting.
         """
         with self.lock:
             if self.state not in (self.STATE_CHARGING, self.STATE_COMPLETING):
@@ -844,6 +893,10 @@ class ChargingTracker:
             if len(self.power_samples) > 3:  # ~30s at 10s poll
                 self.power_samples = self.power_samples[-3:]
 
+            # Track peak power seen during this charge session (for idle detection)
+            if current_power_w > self.peak_power_w:
+                self.peak_power_w = current_power_w
+
             # Decision logic
             target_reached = self.effective_soc >= self.target_soc
 
@@ -855,8 +908,7 @@ class ChargingTracker:
                 return self.state
 
             # Target reached. Check if power dropped to idle.
-            # Use the LAST power sample (instantaneous), not the rolling avg
-            # (rolling avg includes the high-power period when car was actively charging)
+            # The breaker measures only the car circuit, so absolute threshold works.
             current_power_check = current_power_w
             if current_power_check <= idle_power_w:
                 # Power is low - the car probably finished accepting charge
@@ -984,10 +1036,14 @@ def poll_loop():
             # ── Charging tracker update + auto-stop check ──
             if charging.state in (ChargingTracker.STATE_CHARGING, ChargingTracker.STATE_COMPLETING):
                 cfg = load_config()
+                # Use breaker's power (V×I from DPS 6) and energy (DPS 1) for charge tracking
+                br_power_w = br.get("power_w", 0) if br else 0
+                br_energy_wh = br.get("energy_wh", 0) if br else 0
+                br_energy_kwh = br_energy_wh / 1000 if br_energy_wh else 0
                 if br:
                     charging.update(
-                        current_energy_kwh=br.get("energy_kwh", 0),
-                        current_power_w=br.get("phase_a", 0) * 0.127 + br.get("phase_b", 0) * 0.127,  # mA * 127V → W (approx)
+                        current_energy_kwh=br_energy_kwh,
+                        current_power_w=br_power_w,
                         idle_power_w=cfg.get("car_charge_idle_power_w", 15),
                         idle_seconds_needed=cfg.get("car_charge_idle_seconds_to_stop", 120),
                     )
@@ -996,7 +1052,7 @@ def poll_loop():
                         elapsed = (datetime.now() - charging.start_time).total_seconds()
                         update_charge_session_progress(
                             charging.session_uuid,
-                            current_energy_kwh=br.get("energy_kwh", 0),
+                            current_energy_kwh=br_energy_kwh,
                             current_soc=charging.effective_soc,
                             duration_seconds=int(elapsed),
                             avg_power_w=charging.last_power_w,
@@ -1014,9 +1070,13 @@ def poll_loop():
                             state.update("breaker", read_breaker(d_brk))
                             # Finalize DB session
                             if charging.session_uuid:
+                                with state.lock:
+                                    br_end = state.latest.get("breaker", {})
+                                end_energy_wh = br_end.get("energy_wh", 0) if br_end else 0
+                                end_energy = end_energy_wh / 1000 if end_energy_wh else 0
                                 finalize_charge_session(
                                     charging.session_uuid,
-                                    end_energy_kwh=br.get("energy_kwh", 0),
+                                    end_energy_kwh=end_energy,
                                     soc_end=charging.effective_soc,
                                     end_reason="auto",
                                 )
@@ -1250,11 +1310,14 @@ def api_car_start_charge():
         # Initialize the charging tracker + create DB session
         cfg = load_config()
         cost_per_kwh = cfg.get("kwh_cost", 0.956)
+        # Use breaker energy counter (Wh) for session tracking
+        start_energy_wh = br.get("energy_wh", 0)
+        start_energy = start_energy_wh / 1000 if start_energy_wh else 0
         session = create_charge_session(
             soc_start=cfg.get("car_current_soc", 50),
             soc_target=cfg.get("car_target_soc", 80),
             battery_kwh=cfg.get("car_battery_kwh", 12.9),
-            start_energy_kwh=br.get("energy_kwh", 0),
+            start_energy_kwh=start_energy,
             cost_per_kwh=cost_per_kwh,
         )
         charging.start(
@@ -1290,10 +1353,12 @@ def api_car_stop_charge():
         result = None
         if charging.session_uuid:
             with state.lock:
-                br = state.latest.get("breaker", {})
+                br_end = state.latest.get("breaker", {})
+            end_energy_wh = br_end.get("energy_wh", 0) if br_end else 0
+            end_energy = end_energy_wh / 1000 if end_energy_wh else 0
             result = finalize_charge_session(
                 charging.session_uuid,
-                end_energy_kwh=br.get("energy_kwh", 0),
+                end_energy_kwh=end_energy,
                 soc_end=charging.effective_soc,
                 end_reason="manual",
             )
