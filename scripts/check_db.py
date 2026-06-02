@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Check which DB tuya_dashboard is using and its status."""
+"""Check which DB energia-domestica is using and its status.
+
+Discovers the DB location relative to the script (project root) so it works
+on any machine, not just the original author's.
+"""
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent if '__file__' in dir() else Path("/home/bruno/.openclaw/workspace")
-DB_FILE = BASE_DIR / "tuya_history.db"
+# Project layout: scripts/ is at <project_root>/scripts/
+# so project root is one level up from this file.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DB_FILE = PROJECT_ROOT / "data" / "tuya_history.db"
 
 print(f"DB path: {DB_FILE}")
 print(f"DB exists: {DB_FILE.exists()}")

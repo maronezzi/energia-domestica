@@ -336,8 +336,7 @@ def update_charge_session_progress(session_uuid, current_energy_kwh, current_soc
     """Update an in-progress session with the latest readings (called periodically)."""
     conn = get_db()
     try:
-        energy_delivered = max(0.0, current_energy_kwh - (current_soc and 0 or 0))  # noop, computed below
-        # We need start_energy_kwh to compute delivered
+        # Look up start_energy_kwh so we can compute the delivered-energy delta
         row = conn.execute(
             "SELECT start_energy_kwh FROM charge_sessions WHERE session_uuid = ?",
             (session_uuid,),
@@ -679,17 +678,17 @@ def db_hourly(date=None):
     """Return hourly consumption from local readings."""
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
-    
+
     conn = get_db()
     try:
         rows = conn.execute(
             "SELECT timestamp, energy, power FROM readings WHERE device='fase1' AND DATE(timestamp)=? ORDER BY timestamp",
             (date,)
         ).fetchall()
-        
+
         if not rows:
-            return {"date": date, "hours": {}, "total_kwh": 0, "source": "local"}
-        
+            return {"date": date, "hours": [], "total_kwh": 0, "source": "local"}
+
         # Group by hour
         hourly = defaultdict(lambda: {"count": 0, "energy_sum": 0, "power_sum": 0})
         for row in rows:
@@ -698,22 +697,28 @@ def db_hourly(date=None):
             hourly[hour]["count"] += 1
             hourly[hour]["energy_sum"] += energy
             hourly[hour]["power_sum"] += power
-        
-        hours = {}
+
+        # Build array of 24 hour entries (frontend expects an array, not a dict)
+        hours = []
+        total_kwh = 0.0
         for h in range(24):
             hh = f"{h:02d}"
             if hh in hourly:
-                avg_energy = hourly[hh]["energy_sum"] / hourly[hh]["count"] if hourly[hh]["count"] > 0 else 0
-                hours[hh] = {
-                    "avg_power_w": round(hourly[hh]["power_sum"] / hourly[hh]["count"], 1),
-                    "readings": hourly[hh]["count"],
-                }
+                cnt = hourly[hh]["count"]
+                avg_power = hourly[hh]["power_sum"] / cnt if cnt > 0 else 0
+                kwh = avg_power / 1000
             else:
-                hours[hh] = {"avg_power_w": 0, "readings": 0}
-        
-        # Total kWh from hourly average power
-        total_kwh = sum(hours[h]["avg_power_w"] for h in hours) / 1000
-        
+                cnt = 0
+                avg_power = 0
+                kwh = 0
+            total_kwh += kwh
+            hours.append({
+                "hour": hh,
+                "kwh": round(kwh, 4),
+                "avg_power_w": round(avg_power, 1),
+                "readings": cnt,
+            })
+
         return {
             "date": date,
             "hours": hours,
@@ -1067,6 +1072,90 @@ def api_today():
 def api_daily_history(days: int = 30):
     return {"days": db_daily_history(days)}
 
+
+def db_monthly_stats(year: int, month: int):
+    """Return monthly aggregated stats: total kWh, cost, daily breakdown."""
+    cfg = load_config()
+    cost = cfg.get("kwh_cost", 0.956)
+    first = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        last = f"{year + 1:04d}-01-01"
+    else:
+        last = f"{year:04d}-{month + 1:02d}-01"
+    conn = get_db()
+    try:
+        # Daily energy delta = max(energy) - min(energy) per day, summed for the month.
+        days = conn.execute(
+            """SELECT DATE(timestamp) AS day,
+                      MAX(energy) AS e_max, MIN(energy) AS e_min
+               FROM readings
+               WHERE device = 'fase1' AND timestamp >= ? AND timestamp < ?
+                 AND energy IS NOT NULL
+               GROUP BY DATE(timestamp)
+               ORDER BY day""",
+            (first, last),
+        ).fetchall()
+        daily = []
+        total_kwh = 0.0
+        for day, e_max, e_min in days:
+            delta = max(0.0, (e_max or 0) - (e_min or 0))
+            # Tuya energy counter is in Wh, convert to kWh
+            delta_kwh = delta / 1000.0
+            total_kwh += delta_kwh
+            daily.append({
+                "day": day,
+                "kwh": round(delta_kwh, 4),
+                "cost": round(delta_kwh * cost, 2),
+            })
+        return {
+            "year": year,
+            "month": month,
+            "total_kwh": round(total_kwh, 4),
+            "total_cost": round(total_kwh * cost, 2),
+            "daily": daily,
+            "source": "local",
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/monthly")
+def api_monthly(year: int, month: int):
+    return db_monthly_stats(year, month)
+
+
+@app.post("/api/cloud-sync")
+def api_cloud_sync():
+    """Force-refresh Tuya cloud cache. Returns summary count."""
+    try:
+        c = get_cloud()
+        if not c:
+            return {"success": False, "error": "cloud not configured"}
+        days = 7
+        for dev in DEVICES.values():
+            get_cloud_logs(dev["id"], days=days, use_cache=False)
+        return {"success": True, "synced_days": days, "devices": len(DEVICES)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/clear-db")
+def api_clear_db(before_days: int = 30):
+    """Prune old readings (keep last N days)."""
+    try:
+        cutoff = (datetime.now() - timedelta(days=before_days)).isoformat()
+        conn = get_db()
+        try:
+            cur = conn.execute("DELETE FROM readings WHERE timestamp < ?", (cutoff,))
+            deleted = cur.rowcount
+            conn.commit()
+            return {"success": True, "deleted": deleted, "kept_days": before_days}
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @app.get("/api/hourly")
 def api_hourly(date: str = None):
     return db_hourly(date)
@@ -1195,7 +1284,8 @@ def api_car_stop_charge():
         # Finalize DB session
         result = None
         if charging.session_uuid:
-            br = state.latest.get("breaker", {})
+            with state.lock:
+                br = state.latest.get("breaker", {})
             result = finalize_charge_session(
                 charging.session_uuid,
                 end_energy_kwh=br.get("energy_kwh", 0),
@@ -1299,12 +1389,26 @@ def api_config():
 def api_config_update(cfg: dict = None):
     if cfg is None:
         return {"error": "No config provided"}
+    # Whitelist of allowed config keys (prevents arbitrary key injection)
+    ALLOWED_CONFIG_KEYS = {
+        "kwh_cost", "kwh_currency",
+        "car_battery_kwh", "car_charge_power_w",
+        "car_target_soc", "car_current_soc",
+        "car_charging", "car_charge_start_kwh",
+        "car_charge_start_time", "car_charge_start_soc",
+        "car_charge_idle_seconds_to_stop", "car_charge_idle_power_w",
+        "car_charge_auto_stop",
+        "cloud_enabled",
+    }
+    safe_cfg = {k: v for k, v in cfg.items() if k in ALLOWED_CONFIG_KEYS}
+    rejected = set(cfg.keys()) - set(safe_cfg.keys())
     current = load_config()
-    current.update(cfg)
+    current.update(safe_cfg)
     save_config(current)
-    # Reload config
-    if "cloud_enabled" in cfg:
-        pass  # Just save, cloud fetch respects this flag
+    result = {"success": True, "updated": list(safe_cfg.keys())}
+    if rejected:
+        result["rejected"] = sorted(rejected)
+    return result
     return current
 
 @app.get("/api/cloud-logs")
@@ -1343,7 +1447,7 @@ def api_cloud_status():
 
 @app.get("/")
 def root():
-    html_path = BASE_DIR / "tuya_dashboard_page.html"
+    html_path = BASE_DIR / "src" / "index.html"
     if html_path.exists():
         return HTMLResponse(html_path.read_text())
     return {"status": "Tuya Energy Dashboard", "version": "2.0-local-first", "message": "HTML page not found"}
@@ -1358,4 +1462,11 @@ if __name__ == "__main__":
 ╚══════════════════════════════════════════════════════════╝
     """)
     threading.Thread(target=poll_loop, daemon=True).start()
-    uvicorn.run(app, host="0.0.0.0", port=8050, log_level="warning")
+    # Bind address:
+    #   ENERGIA_HOST=127.0.0.1 (default, safer — only loopback)
+    #   ENERGIA_HOST=0.0.0.0   (expose to LAN; required to access from other devices)
+    host = os.environ.get("ENERGIA_HOST", "127.0.0.1")
+    port = int(os.environ.get("ENERGIA_PORT", "8050"))
+    print(f"🌐 Dashboard em http://{host}:{port}")
+    print(f"   Override via ENERGIA_HOST / ENERGIA_PORT env vars")
+    uvicorn.run(app, host=host, port=port, log_level="warning")

@@ -83,6 +83,10 @@ StandardError=append:$PROJECT_DIR/logs/service.err
 
 # Environment
 Environment=PYTHONUNBUFFERED=1
+# Default: bind to LAN so the dashboard is reachable from phone/tablet.
+# Set to 127.0.0.1 if you only want loopback access (more secure).
+Environment=ENERGIA_HOST=0.0.0.0
+Environment=ENERGIA_PORT=8050
 
 [Install]
 WantedBy=multi-user.target

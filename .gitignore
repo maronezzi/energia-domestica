@@ -18,7 +18,10 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 logs/*.log
+logs/*.err
 logs/*.csv
+*.log
+*.err
 *.csv
 !docs/*.csv
 !scripts/*.csv
