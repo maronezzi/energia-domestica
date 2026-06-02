@@ -1,0 +1,4 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+tinytuya>=1.13
+pydantic>=2.5

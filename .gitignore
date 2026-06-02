@@ -1,0 +1,53 @@
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ─── Project data (never commit user data or credentials) ───
+data/tuya_history.db
+data/tuya_config.json
+data/devices.json
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+logs/*.log
+logs/*.csv
+*.csv
+!docs/*.csv
+!scripts/*.csv
+
+# ─── Tuya cloud cache (may contain tokens) ───
+tuya_cloud_cache.json
+
+# ─── IDE / editor ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Environment / secrets ───
+.env
+.env.local
+*.pem
+secrets/
+
+# ─── Build / dist ───
+build/
+dist/
+*.whl
+
+# ─── Python venv created by install.sh ───
+.venv_energia/
+
+# ─── System service overrides / local logs ───
+*.local

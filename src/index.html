@@ -1,0 +1,1110 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>⚡ Energia Doméstica</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        :root{
+            --bg:#0a0e14;--bg2:#111620;--card:#161c28;--accent:#00d4aa;--accent2:#3b82f6;
+            --warn:#f59e0b;--danger:#ef4444;--ok:#22c55e;--text:#e2e8f0;--dim:#64748b;--border:#1e293b;
+        }
+        body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+
+        header{background:var(--bg2);border-bottom:1px solid var(--border);padding:1rem 2rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}
+        .logo{display:flex;align-items:center;gap:.8rem}
+        .logo-icon{width:42px;height:42px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.4rem}
+        .logo-text{font-size:1.3rem;font-weight:700;color:var(--accent)}
+        .logo-sub{font-size:.7rem;color:var(--dim)}
+        .header-right{display:flex;align-items:center;gap:1.5rem}
+        .live-badge{display:flex;align-items:center;gap:.5rem;background:rgba(0,212,170,.1);border:1px solid rgba(0,212,170,.3);padding:.4rem .8rem;border-radius:999px;font-size:.75rem;color:var(--accent)}
+        .live-dot{width:8px;height:8px;background:var(--accent);border-radius:50%;animation:pulse 2s infinite}
+        .live-dot.offline{background:var(--danger);animation:none}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+        .last-update{font-size:.8rem;color:var(--dim)}
+
+        main{padding:1.5rem 2rem;max-width:1400px;margin:0 auto}
+
+        .tabs{display:flex;gap:.3rem;margin-bottom:1.5rem;border-bottom:1px solid var(--border);padding-bottom:.5rem}
+        .tab{padding:.6rem 1.2rem;border-radius:8px 8px 0 0;border:none;background:transparent;color:var(--dim);cursor:pointer;font-size:.9rem;font-weight:500;transition:all .2s}
+        .tab:hover{color:var(--text);background:var(--card)}
+        .tab.active{background:var(--card);color:var(--accent);border-bottom:2px solid var(--accent)}
+        .tab-content{display:none}.tab-content.active{display:block}
+
+        /* Status bar */
+        .status-bar{display:grid;grid-template-columns:repeat(6,1fr);gap:1rem;margin-bottom:1.5rem}
+        .status-item{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1rem 1.2rem;display:flex;align-items:center;gap:1rem;transition:border-color .3s}
+        .status-item:hover{border-color:var(--accent)}
+        .si-icon{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.3rem}
+        .si-label{font-size:.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+        .si-val{font-size:1.5rem;font-weight:700;margin-top:.1rem}
+        .si-unit{font-size:.85rem;font-weight:400;color:var(--dim)}
+
+        /* Cards */
+        .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:1.5rem;margin-bottom:1.5rem;position:relative;overflow:hidden}
+        .card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+        .card h2{font-size:1.2rem;display:flex;align-items:center;gap:.8rem}
+        .card h3{font-size:.9rem;margin-bottom:1rem;color:var(--dim);display:flex;align-items:center;gap:.4rem}
+        .badge{padding:.2rem .6rem;border-radius:6px;font-size:.7rem;font-weight:600}
+        .badge-blue{background:rgba(59,130,246,.15);color:var(--accent2)}
+
+        /* Car */
+        .car-grid{display:grid;grid-template-columns:1fr 1fr;gap:2rem}
+        .car-visual{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1rem}
+        .car-icon{font-size:6rem;transition:all .5s}
+        .car-icon.charging{animation:float 2s ease-in-out infinite;filter:drop-shadow(0 0 20px rgba(0,212,170,.5))}
+        .car-icon.off{filter:grayscale(.5) opacity(.6)}
+        @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+        .car-gauge-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative}
+        .car-gauge{position:relative;width:200px;height:200px}
+        .car-gauge svg{transform:rotate(-90deg)}
+        .car-gauge .gauge-bg{fill:none;stroke:rgba(255,255,255,.1);stroke-width:12}
+        .car-gauge .gauge-fill{fill:none;stroke:var(--accent);stroke-width:12;stroke-linecap:round;stroke-dasharray:490;stroke-dashoffset:490;transition:stroke-dashoffset .8s ease}
+        .car-gauge .gauge-target{fill:none;stroke:var(--warn);stroke-width:4;stroke-linecap:round;stroke-dasharray:490;stroke-dashoffset:490}
+        .car-gauge-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
+        .car-gauge-pct{font-size:2.2rem;font-weight:800;color:var(--accent)}
+        .car-gauge-lbl{font-size:.65rem;color:var(--dim);text-transform:uppercase;margin-top:.2rem}
+        .car-target-marker{position:absolute;top:-8px;width:4px;height:calc(50% + 8px);background:var(--warn);border-radius:2px;left:calc(50% + var(--target-x,0px));transform-origin:bottom center}
+        
+        .charge-plan{background:rgba(255,255,255,.03);border-radius:12px;padding:1.2rem;margin-top:1rem}
+        .charge-plan-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem;margin-bottom:.8rem}
+        .cp-item{background:rgba(0,0,0,.2);border-radius:8px;padding:.7rem;text-align:center}
+        .cp-item .cpi-val{font-size:1.4rem;font-weight:800;color:var(--accent)}
+        .cp-item .cpi-lbl{font-size:.6rem;color:var(--dim);text-transform:uppercase;margin-top:.2rem}
+        .cp-item.highlight{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3)}
+        .cp-item.highlight .cpi-val{color:var(--warn)}
+        
+        .soc-controls{display:flex;flex-direction:column;gap:.8rem;margin-top:.5rem}
+        .soc-row{display:flex;align-items:center;gap:.8rem}
+        .soc-label{font-size:.8rem;color:var(--dim);min-width:80px}
+        .soc-input{background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--text);padding:.5rem .8rem;border-radius:8px;width:80px;font-size:.9rem;text-align:center}
+        .soc-presets{display:flex;gap:.4rem;flex-wrap:wrap}
+        .soc-preset{padding:.35rem .75rem;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--dim);font-size:.8rem;cursor:pointer;transition:all .2s}
+        .soc-preset:hover{border-color:var(--accent);color:var(--accent)}
+        .soc-preset.active{background:rgba(0,212,170,.15);border-color:var(--accent);color:var(--accent);font-weight:600}
+        
+        .charge-timer{text-align:center;margin-top:.8rem;padding:.8rem;background:rgba(0,212,170,.05);border-radius:10px;border:1px solid rgba(0,212,170,.2)}
+        .charge-timer .ct-time{font-size:2rem;font-weight:800;color:var(--accent);font-variant-numeric:tabular-nums}
+        .charge-timer .ct-label{font-size:.7rem;color:var(--dim);text-transform:uppercase;margin-top:.2rem}
+        .charge-timer.done{background:rgba(34,197,94,.1);border-color:var(--ok)}
+        .charge-timer.done .ct-time{color:var(--ok)}
+        .charge-session{margin-top:.6rem;padding:.7rem;background:rgba(0,0,0,.2);border-radius:8px;font-size:.8rem}
+        .charge-session .cs-row{display:flex;justify-content:space-between;padding:.15rem 0}
+        .charge-session .cs-lbl{color:var(--dim)}
+        .charge-session .cs-val{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+        .charge-session .cs-status{margin-top:.4rem;padding:.3rem .6rem;background:rgba(0,212,170,.1);border-radius:4px;color:var(--accent);font-size:.75rem;text-align:center}
+        .charge-session .cs-status.completing{background:rgba(245,158,11,.15);color:var(--warn)}
+        .charge-session .cs-status.done{background:rgba(34,197,94,.15);color:var(--ok)}
+        .charge-session .cs-status.error{background:rgba(239,68,68,.15);color:var(--danger)}
+        .cs-idle-progress{margin-top:.5rem}
+        .cs-idle-label{font-size:.7rem;color:var(--dim);margin-bottom:.2rem;text-align:center}
+        .cs-idle-bar{height:6px;background:rgba(0,0,0,.3);border-radius:3px;overflow:hidden}
+        .cs-idle-fill{height:100%;background:linear-gradient(90deg,var(--warn),var(--ok));width:0%;transition:width 1s linear}
+        .charge-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.8rem;margin:1rem 0}
+        .cs-card{background:rgba(0,0,0,.2);border-radius:10px;padding:1rem;text-align:center;min-width:0}
+        .cs-card-lbl{font-size:.65rem;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:.3rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .cs-card-val{font-size:1.5rem;font-weight:800;color:var(--accent);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .data-table{width:100%;border-collapse:collapse;font-size:.85rem}
+        .data-table th{text-align:left;padding:.6rem .8rem;background:rgba(0,0,0,.3);color:var(--dim);font-weight:600;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
+        .data-table td{padding:.5rem .8rem;border-bottom:1px solid rgba(255,255,255,.04);font-variant-numeric:tabular-nums}
+        .data-table tr:hover td{background:rgba(0,212,170,.05)}
+        .data-table .num{text-align:right}
+        .data-table .status-badge{display:inline-block;padding:.15rem .5rem;border-radius:10px;font-size:.7rem;font-weight:600;text-transform:uppercase}
+        .data-table .status-badge.completed{background:rgba(34,197,94,.15);color:var(--ok)}
+        .data-table .status-badge.auto_stopped{background:rgba(59,130,246,.15);color:var(--accent2)}
+        .data-table .status-badge.aborted{background:rgba(239,68,68,.15);color:var(--danger)}
+        .data-table .status-badge.active{background:rgba(245,158,11,.15);color:var(--warn)}
+        .table-wrap{overflow-x:auto;border-radius:8px;border:1px solid var(--border)}
+        
+        .car-info-bar{display:flex;gap:1.2rem;margin-top:1rem;padding:.8rem;background:rgba(255,255,255,.03);border-radius:8px}
+        .cib-item{font-size:.8rem}
+        .cib-item span{color:var(--dim)}
+        .cib-item strong{color:var(--accent)}
+        .breaker-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.5rem;margin-top:.8rem}
+        .breaker-item{background:rgba(0,0,0,.2);border-radius:8px;padding:.6rem .8rem;min-width:0}
+        .breaker-item .bl{font-size:.65rem;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:.2rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .breaker-item .bv{font-size:1.05rem;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        
+        .car-btn-start{background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;box-shadow:0 4px 15px rgba(34,197,94,.3);padding:1rem 2rem;border-radius:12px;border:none;font-size:1rem;font-weight:700;cursor:pointer;width:100%;min-height:56px;transition:all .3s;display:flex;align-items:center;justify-content:center;gap:.6rem}
+        .car-btn-start:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 6px 20px rgba(34,197,94,.4)}
+        .car-btn-stop{background:rgba(239,68,68,.1);color:var(--danger);border:2px solid var(--danger);padding:1rem 2rem;border-radius:12px;font-size:1rem;font-weight:700;cursor:pointer;width:100%;min-height:56px;transition:all .3s;display:flex;align-items:center;justify-content:center;gap:.6rem}
+        .car-btn-stop:hover{background:rgba(239,68,68,.2)}
+        .car-btn-start:disabled,.car-btn-stop:disabled{opacity:.4;cursor:not-allowed}
+
+
+        /* Phases */
+        .phases-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;margin-bottom:1.5rem}
+        .phase{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.2rem;transition:border-color .3s}
+        .phase:hover{border-color:var(--accent)}
+        .phase.future{opacity:.5;border-style:dashed}
+        .phase-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
+        .phase-name{font-weight:600;display:flex;align-items:center;gap:.5rem}
+        .phase-active{font-size:.65rem;padding:.15rem .5rem;border-radius:4px;background:rgba(0,212,170,.15);color:var(--accent)}
+        .phase-soon{font-size:.65rem;padding:.15rem .5rem;border-radius:4px;background:rgba(100,116,139,.15);color:var(--dim)}
+        .gauges{display:grid;grid-template-columns:repeat(3,1fr);gap:.6rem;margin-bottom:.8rem}
+        .gauge{text-align:center;background:rgba(255,255,255,.03);border-radius:8px;padding:.6rem .3rem}
+        .gauge .gv{font-size:1.2rem;font-weight:700;color:var(--accent)}
+        .gauge .gl{font-size:.6rem;color:var(--dim);text-transform:uppercase;margin-top:.15rem}
+        .phase-footer{display:flex;justify-content:space-between;align-items:center;padding-top:.8rem;border-top:1px solid var(--border)}
+        .phase-footer .pf-label{font-size:.75rem;color:var(--dim)}
+        .phase-footer .pf-val{font-size:1.4rem;font-weight:700;color:var(--accent)}
+        .phase-footer .pf-unit{font-size:.75rem;color:var(--dim);margin-left:.2rem}
+
+        /* Charts */
+        .charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem}
+        .chart-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.2rem}
+        .chart-box{position:relative;height:200px}
+
+        /* History */
+        .history-bar{display:flex;gap:1rem;align-items:center;margin-bottom:1.5rem;flex-wrap:wrap}
+        .month-nav{display:flex;gap:.3rem}
+        .month-nav button{background:var(--card);border:1px solid var(--border);color:var(--text);padding:.5rem .8rem;border-radius:8px;cursor:pointer;font-size:.9rem}
+        .month-nav button:hover{border-color:var(--accent)}
+        .month-display{font-size:1.1rem;font-weight:600;padding:0 1rem;min-width:180px;text-align:center}
+        .admin-btns{display:flex;gap:.5rem;margin-left:auto}
+        .admin-btns button{padding:.5rem 1rem;border-radius:8px;cursor:pointer;font-size:.85rem}
+
+        .summary{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
+        .sum-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.2rem;text-align:center}
+        .sum-card .big{font-size:2rem;font-weight:800;color:var(--accent)}
+        .sum-card .big.cur{font-size:1.6rem}
+        .sum-card .lbl{font-size:.75rem;color:var(--dim);text-transform:uppercase;margin-top:.3rem}
+        .sum-card .sub{font-size:.8rem;color:var(--dim);margin-top:.2rem}
+
+        .hourly-stats{display:flex;gap:1rem;margin-bottom:1rem}
+        .hourly-stat{flex:1;text-align:center;border-radius:8px;padding:.8rem}
+        .hourly-stat .hv{font-size:1.5rem;font-weight:700}
+        .hourly-stat .hl{font-size:.7rem;color:var(--dim)}
+
+        .table-card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+        .table-card h3{font-size:.9rem;padding:1rem 1.2rem;color:var(--dim);border-bottom:1px solid var(--border)}
+        .table-card table{width:100%;border-collapse:collapse}
+        .table-card th{text-align:left;padding:.6rem 1.2rem;font-size:.7rem;color:var(--dim);text-transform:uppercase;border-bottom:1px solid var(--border)}
+        .table-card td{padding:.6rem 1.2rem;font-size:.9rem;border-bottom:1px solid rgba(255,255,255,.03)}
+        .table-card tr:hover td{background:rgba(255,255,255,.02)}
+        .num{font-variant-numeric:tabular-nums;text-align:right}
+        .cost{color:var(--ok);font-weight:600}
+
+        /* Settings */
+        .settings{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;max-width:500px}
+        .settings h3{font-size:1rem;margin-bottom:1rem;color:var(--text)}
+        .s-row{display:flex;justify-content:space-between;align-items:center;padding:.8rem 0;border-bottom:1px solid var(--border)}
+        .s-row:last-child{border-bottom:none}
+        .s-label .desc{font-size:.75rem;color:var(--dim);margin-top:.2rem}
+        .s-input{display:flex;gap:.5rem;align-items:center}
+        .s-input input{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:.5rem .8rem;border-radius:8px;width:120px;font-size:.9rem;text-align:right}
+        .s-input input:focus{outline:none;border-color:var(--accent)}
+        .btn-save{background:var(--accent);color:var(--bg);border:none;padding:.6rem 1.2rem;border-radius:8px;cursor:pointer;font-weight:600;font-size:.9rem}
+
+        footer{text-align:center;padding:2rem;color:var(--dim);font-size:.75rem}
+        footer a{color:var(--accent);text-decoration:none}
+
+        @media(max-width:1100px){.status-bar{grid-template-columns:repeat(3,1fr)}}
+        @media(max-width:900px){
+            .car-grid{grid-template-columns:1fr}
+            .status-bar{grid-template-columns:repeat(2,1fr)}
+            .phases-grid,.charts-grid{grid-template-columns:1fr}
+            .summary{grid-template-columns:repeat(2,1fr)}
+        }
+        @media(max-width:600px){main{padding:1rem}header{padding:.8rem 1rem}.logo-sub{display:none}}
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="logo">
+        <div class="logo-icon">⚡</div>
+        <div><div class="logo-text">Energia Doméstica</div><div class="logo-sub">Monitoramento Local</div></div>
+    </div>
+    <div class="header-right">
+        <div class="live-badge"><div class="live-dot" id="liveDot"></div><span id="statusText">Conectando</span></div>
+        <div class="last-update" id="lastUpdate">—</div>
+    </div>
+</header>
+
+<main>
+<div class="tabs">
+    <button class="tab active" onclick="showTab('dashboard')">📊 Dashboard</button>
+    <button class="tab" onclick="showTab('history')">📈 Histórico</button>
+    <button class="tab" onclick="showTab('charges')">🔌 Carregamentos</button>
+    <button class="tab" onclick="showTab('settings')">⚙️ Config</button>
+</div>
+
+<!-- ═══ DASHBOARD ═══ -->
+<div id="tab-dashboard" class="tab-content active">
+
+    <div class="status-bar">
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">⚡</div><div><div class="si-label">Consumo</div><div class="si-val"><span id="vPower">—</span> <span class="si-unit">W</span></div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(59,130,246,.15)">🔌</div><div><div class="si-label">Tensão</div><div class="si-val"><span id="vVoltage">—</span> <span class="si-unit">V</span></div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">🔋</div><div><div class="si-label">Corrente</div><div class="si-val"><span id="vCurrent">—</span> <span class="si-unit">A</span></div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">📊</div><div><div class="si-label">Energia</div><div class="si-val"><span id="vEnergy">—</span> <span class="si-unit">kWh</span></div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">💰</div><div><div class="si-label">Custo Mês</div><div class="si-val" style="color:var(--ok)" id="vMonthCost">R$ —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">📅</div><div><div class="si-label">Custo Hoje</div><div class="si-val" style="color:var(--warn)" id="vTodayCost">R$ —</div></div></div>
+    </div>
+
+    <!-- Car -->
+    <div class="card">
+        <h2>🚗 Carregamento do Veículo <span class="badge badge-blue">Disjuntor</span></h2>
+        <div class="car-grid">
+            <div class="car-visual">
+                <div class="car-gauge-wrap">
+                    <div class="car-gauge" id="carGauge">
+                        <svg viewBox="0 0 200 200" style="width:200px;height:200px">
+                            <circle class="gauge-bg" cx="100" cy="100" r="78"/>
+                            <circle class="gauge-fill" id="gaugeFill" cx="100" cy="100" r="78"
+                                stroke-dasharray="490 490" stroke-dashoffset="490" style="fill:none"/>
+                            <circle class="gauge-target" id="gaugeTarget" cx="100" cy="100" r="78"
+                                stroke-dasharray="490 490" stroke-dashoffset="490" style="fill:none"/>
+                        </svg>
+                        <div class="car-gauge-center">
+                            <div class="car-gauge-pct" id="gaugePct">50%</div>
+                            <div class="car-gauge-lbl">Bateria</div>
+                        </div>
+                    </div>
+                    <div class="car-target-marker" id="targetMarker"></div>
+                </div>
+                <div class="car-status on" id="carStatus" style="margin-top:.5rem">DESLIGADO</div>
+                <div class="charge-timer" id="chargeTimer" style="display:none">
+                    <div class="ct-time" id="timerDisplay">00:00</div>
+                    <div class="ct-label">Tempo restante</div>
+                </div>
+                <div class="charge-session" id="chargeSession" style="display:none">
+                    <div class="cs-row">
+                        <span class="cs-lbl">SOC efetivo:</span>
+                        <span class="cs-val" id="csEffectiveSoc">—%</span>
+                    </div>
+                    <div class="cs-row">
+                        <span class="cs-lbl">Energia entregue:</span>
+                        <span class="cs-val" id="csEnergyDelivered">— kWh</span>
+                    </div>
+                    <div class="cs-row">
+                        <span class="cs-lbl">Decorrido:</span>
+                        <span class="cs-val" id="csElapsed">—</span>
+                    </div>
+                    <div class="cs-status" id="csStatus">Carregando...</div>
+                    <div class="cs-idle-progress" id="csIdleProgress" style="display:none">
+                        <div class="cs-idle-label">Auto-desligar em <span id="csIdleCountdown">—</span>s</div>
+                        <div class="cs-idle-bar"><div class="cs-idle-fill" id="csIdleFill"></div></div>
+                    </div>
+                </div>
+            </div>
+            <div class="car-controls">
+                <button class="car-btn-start" id="btnStart" onclick="startCharge()">⚡ INICIAR CARREGAMENTO</button>
+                <button class="car-btn-stop" id="btnStop" onclick="stopCharge()" style="display:none">⏹ PARAR CARREGAMENTO</button>
+                <div class="alert" id="carAlert"></div>
+
+                <!-- Charge plan -->
+                <div class="charge-plan" id="chargePlan">
+                    <div style="font-size:.75rem;color:var(--dim);margin-bottom:.6rem;text-transform:uppercase">Plano de Carga</div>
+                    <div class="charge-plan-grid">
+                        <div class="cp-item highlight">
+                            <div class="cpi-val" id="planKwh">—</div>
+                            <div class="cpi-lbl">kWh Restante</div>
+                        </div>
+                        <div class="cp-item">
+                            <div class="cpi-val" id="planTime">—</div>
+                            <div class="cpi-lbl">Tempo (h)</div>
+                        </div>
+                        <div class="cp-item">
+                            <div class="cpi-val" id="planCost">—</div>
+                            <div class="cpi-lbl">Custo (R$)</div>
+                        </div>
+                        <div class="cp-item">
+                            <div class="cpi-val" id="planEnergy">—</div>
+                            <div class="cpi-lbl">Meta</div>
+                        </div>
+                    </div>
+                    <label class="auto-stop-toggle" style="display:flex;align-items:center;gap:.5rem;margin-top:.8rem;font-size:.85rem;color:var(--dim);cursor:pointer">
+                        <input type="checkbox" id="autoStopToggle" checked onchange="toggleAutoStop()">
+                        <span>🔌 Desligar disjuntor automaticamente ao completar</span>
+                    </label>
+
+                    <!-- SOC controls -->
+                    <div class="soc-controls">
+                        <div class="soc-row">
+                            <div class="soc-label">SOC Atual</div>
+                            <input type="number" class="soc-input" id="socCurrent" min="0" max="100" value="50" onchange="updateSoc()">
+                            <span style="color:var(--dim);font-size:.8rem">%</span>
+                        </div>
+                        <div class="soc-row">
+                            <div class="soc-label">Meta</div>
+                            <input type="number" class="soc-input" id="socTarget" min="0" max="100" value="80" onchange="updateTarget()">
+                            <span style="color:var(--dim);font-size:.8rem">%</span>
+                            <div class="soc-presets">
+                                <button class="soc-preset" onclick="setTarget(50)">50%</button>
+                                <button class="soc-preset" onclick="setTarget(60)">60%</button>
+                                <button class="soc-preset" onclick="setTarget(70)">70%</button>
+                                <button class="soc-preset active" onclick="setTarget(80)">80%</button>
+                                <button class="soc-preset" onclick="setTarget(90)">90%</button>
+                                <button class="soc-preset" onclick="setTarget(100)">100%</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="breaker-grid" style="margin-top:.8rem">
+                    <div class="breaker-item"><div class="bl">Energia</div><div class="bv"><span id="brEnergy">—</span> kWh</div></div>
+                    <div class="breaker-item"><div class="bl">Corrente A</div><div class="bv"><span id="brPhases">—</span> mA</div></div>
+                    <div class="breaker-item"><div class="bl">Fault</div><div class="bv"><span id="brFault">0</span></div></div>
+                    <div class="breaker-item"><div class="bl">Temp</div><div class="bv"><span id="brTemp">—</span>°C</div></div>
+                </div>
+                <div class="car-info-bar">
+                    <div class="cib-item"><span>Bateria:</span> <strong id="cibBattery">12.9 kWh</strong></div>
+                    <div class="cib-item"><span>Potência:</span> <strong id="cibPower">2400 W</strong></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Phases -->
+    <div class="phases-grid">
+        <div class="phase">
+            <div class="phase-head"><div class="phase-name">⚡ Fase 1</div><span class="phase-active">ATIVO</span></div>
+            <div class="gauges">
+                <div class="gauge"><div class="gv" id="p1V">—</div><div class="gl">Tensão</div></div>
+                <div class="gauge"><div class="gv" id="p1I">—</div><div class="gl">Corrente</div></div>
+                <div class="gauge"><div class="gv" id="p1P">—</div><div class="gl">Potência</div></div>
+            </div>
+            <div class="phase-footer"><span class="pf-label">Energia Acumulada</span><div><span class="pf-val" id="p1E">—</span><span class="pf-unit">kWh</span></div></div>
+        </div>
+        <div class="phase future">
+            <div class="phase-head"><div class="phase-name">⚡ Fase 2</div><span class="phase-soon">EM BREVE</span></div>
+            <div class="gauges"><div class="gauge"><div class="gv">—</div><div class="gl">Tensão</div></div><div class="gauge"><div class="gv">—</div><div class="gl">Corrente</div></div><div class="gauge"><div class="gv">—</div><div class="gl">Potência</div></div></div>
+            <div class="phase-footer"><span class="pf-label">Energia Acumulada</span><div><span class="pf-val">—</span><span class="pf-unit">kWh</span></div></div>
+        </div>
+    </div>
+
+    <!-- Realtime charts -->
+    <div class="charts-grid">
+        <div class="chart-card"><h3>📈 Potência (W) — últimos 10min</h3><div class="chart-box"><canvas id="chartPower"></canvas></div></div>
+        <div class="chart-card"><h3>🔋 Energia Acumulada (kWh)</h3><div class="chart-box"><canvas id="chartEnergy"></canvas></div></div>
+    </div>
+</div>
+
+<!-- ═══ HISTÓRICO ═══ -->
+<div id="tab-history" class="tab-content">
+    <div class="history-bar">
+        <div class="month-nav"><button onclick="chgMonth(-1)">◀</button></div>
+        <div class="month-display" id="monthDisp">—</div>
+        <div class="month-nav"><button onclick="chgMonth(1)">▶</button><button onclick="goToday()" style="margin-left:.3rem">Hoje</button></div>
+        <div class="admin-btns">
+            <button onclick="syncCloud()" style="background:var(--card);border:1px solid var(--accent2);color:var(--accent2)">☁️ Sync</button>
+            <button onclick="clearDb()" style="background:rgba(239,68,68,.1);border:1px solid var(--danger);color:var(--danger)">🗑️ Limpar</button>
+        </div>
+    </div>
+
+    <div class="summary">
+        <div class="sum-card"><div class="big" id="hKwh">—</div><div class="lbl">kWh Consumidos</div><div class="sub">no mês</div></div>
+        <div class="sum-card"><div class="big cur" id="hCost">—</div><div class="lbl">Custo Total</div><div class="sub" id="hCostKwh">—</div></div>
+        <div class="sum-card"><div class="big" id="hDays">—</div><div class="lbl">Dias</div></div>
+        <div class="sum-card"><div class="big" id="hAvg">—</div><div class="lbl">Média/Dia</div><div class="sub" id="hAvgCost">—</div></div>
+    </div>
+
+    <!-- Daily bar chart -->
+    <div class="chart-card" style="margin-bottom:1.5rem"><h3>📊 Consumo Diário</h3><div class="chart-box" style="height:250px"><canvas id="chartDaily"></canvas></div></div>
+
+    <!-- Hourly -->
+    <div class="chart-card" style="margin-bottom:1.5rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+            <h3>⏰ Consumo Hora a Hora</h3>
+            <div style="display:flex;gap:.5rem;align-items:center">
+                <input type="date" id="hourlyDate" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:.4rem .6rem;border-radius:6px;font-size:.85rem" onchange="loadHourly()">
+                <button onclick="loadHourly()" style="background:var(--accent);border:none;color:var(--bg);padding:.4rem .8rem;border-radius:6px;cursor:pointer;font-weight:600">🔄</button>
+            </div>
+        </div>
+        <div class="hourly-stats">
+            <div class="hourly-stat" style="background:rgba(0,212,170,.1)"><div class="hv" style="color:var(--accent)" id="hlyTotal">—</div><div class="hl">kWh no dia</div></div>
+            <div class="hourly-stat" style="background:rgba(34,197,94,.1)"><div class="hv" style="color:var(--ok)" id="hlyCost">—</div><div class="hl">Custo</div></div>
+            <div class="hourly-stat" style="background:rgba(245,158,11,.1)"><div class="hv" style="color:var(--warn)" id="hlyAvg">—</div><div class="hl">Média W</div></div>
+        </div>
+        <div class="chart-box" style="height:220px"><canvas id="chartHourly"></canvas></div>
+    </div>
+
+    <!-- Table -->
+    <div class="table-card">
+        <h3>📅 Detalhamento Diário</h3>
+        <table><thead><tr><th>Dia</th><th class="num">kWh Total</th><th class="num">Custo</th><th class="num">Carro kWh</th><th class="num">Carro R$</th><th class="num">Média W</th></tr></thead>
+        <tbody id="dailyTbody"><tr><td colspan="6" style="text-align:center;color:var(--dim);padding:2rem">Carregando...</td></tr></tbody></table>
+    </div>
+</div>
+
+<!-- ═══ CHARGES ═══ -->
+<div id="tab-charges" class="tab-content">
+    <div class="card">
+        <h2>🔌 Carregamentos do Veículo <span class="badge badge-blue" id="chargeSessionCount">0 sessões</span></h2>
+
+        <!-- Summary cards -->
+        <div class="charge-summary" id="chargeSummary">
+            <div class="cs-card">
+                <div class="cs-card-lbl">Sessões</div>
+                <div class="cs-card-val" id="csCount">—</div>
+            </div>
+            <div class="cs-card">
+                <div class="cs-card-lbl">Energia Total</div>
+                <div class="cs-card-val" id="csTotalKwh">— kWh</div>
+            </div>
+            <div class="cs-card">
+                <div class="cs-card-lbl">Custo Total</div>
+                <div class="cs-card-val" style="color:var(--ok)" id="csTotalCost">R$ —</div>
+            </div>
+            <div class="cs-card">
+                <div class="cs-card-lbl">Duração Total</div>
+                <div class="cs-card-val" id="csTotalDuration">— h</div>
+            </div>
+            <div class="cs-card">
+                <div class="cs-card-lbl">Média kWh / Sessão</div>
+                <div class="cs-card-val" id="csAvgKwh">— kWh</div>
+            </div>
+            <div class="cs-card">
+                <div class="cs-card-lbl">Custo Médio</div>
+                <div class="cs-card-val" style="color:var(--warn)" id="csAvgCost">R$ —</div>
+            </div>
+        </div>
+
+        <!-- Filter / period selector -->
+        <div style="display:flex;gap:.5rem;align-items:center;margin:1rem 0 .5rem;flex-wrap:wrap">
+            <span style="color:var(--dim);font-size:.85rem">Período:</span>
+            <button class="soc-preset active" onclick="setChargePeriod(7)">7d</button>
+            <button class="soc-preset" onclick="setChargePeriod(30)">30d</button>
+            <button class="soc-preset" onclick="setChargePeriod(90)">90d</button>
+            <button class="soc-preset" onclick="setChargePeriod(365)">1 ano</button>
+            <button class="soc-preset" onclick="setChargePeriod(9999)">Tudo</button>
+            <span style="margin-left:auto;color:var(--dim);font-size:.8rem" id="chargePeriodLabel">últimos 7 dias</span>
+        </div>
+
+        <!-- Sessions table -->
+        <div class="table-wrap" style="margin-top:.5rem">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Início</th>
+                        <th>Duração</th>
+                        <th>SOC</th>
+                        <th>Energia</th>
+                        <th>Custo</th>
+                        <th>kWh/h</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="chargeTbody">
+                    <tr><td colspan="7" style="text-align:center;color:var(--dim);padding:2rem">Carregando...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ CONFIG ═══ -->
+<div id="tab-settings" class="tab-content">
+    <div class="settings">
+        <h3>💰 Valor do kWh</h3>
+        <div class="s-row"><div class="s-label"><div>Preço do kWh</div><div class="desc">Valor cobrado pela concessionária</div></div><div class="s-input"><span style="color:var(--dim)">R$</span><input type="number" id="kwhInput" step="0.001" min="0"></div></div>
+        <div class="s-row"><div class="s-label"><div>Custo atual</div></div><div class="s-input"><span style="color:var(--dim)">R$</span><input id="kwhDisplay" readonly style="background:transparent;border:none;color:var(--accent);font-weight:700"></div></div>
+        <div style="margin-top:1rem"><button class="btn-save" onclick="saveKwh()">💾 Salvar</button></div>
+        <div class="alert ok" id="settingsOk" style="display:none">✅ Salvo!</div>
+    </div>
+</div>
+</main>
+
+<footer>Dashboard local &bull; Dados nunca saem da rede &bull; <a href="/api/status" target="_blank">API</a></footer>
+
+<script>
+const POLL = 6000;
+let kwhCost = 0.956, curYear, curMonth;
+let cPower, cEnergy, cDaily, cHourly;
+
+const fmt = (v, d=1) => v > 0 ? v.toFixed(d) : '—';
+const fmtR = (v) => 'R$ ' + v.toFixed(2);
+
+function showTab(n) {
+    if (n === 'charges') loadCharges();
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.querySelector(`.tab[onclick*="${n}"]`).classList.add('active');
+    document.getElementById('tab-' + n).classList.add('active');
+    if (n === 'history') loadHistory();
+}
+const MES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+
+function initCharts() {
+    const base = {
+        responsive: true, maintainAspectRatio: false, animation: {duration:200},
+        plugins: {legend: {labels: {color:'#64748b', font:{size:11}}}},
+        scales: {
+            x: {ticks:{color:'#64748b', maxTicksLimit:10}, grid:{color:'rgba(255,255,255,.03)'}},
+            y: {ticks:{color:'#64748b'}, grid:{color:'rgba(255,255,255,.03)'}}
+        }
+    };
+    cPower = new Chart(document.getElementById('chartPower'), {
+        type:'line', data:{labels:[], datasets:[{label:'W', data:[], borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,.15)', fill:true, tension:.4, borderWidth:2}]},
+        options:{...base, scales:{...base.scales, y:{...base.scales.y, ticks:{...base.scales.y.ticks, color:'#f59e0b'}}}}
+    });
+    cEnergy = new Chart(document.getElementById('chartEnergy'), {
+        type:'line', data:{labels:[], datasets:[{label:'kWh', data:[], borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.1)', fill:true, tension:.4}]},
+        options: base
+    });
+    cDaily = new Chart(document.getElementById('chartDaily'), {
+        type:'bar', data:{labels:[], datasets:[{label:'kWh', data:[], backgroundColor:'rgba(0,212,170,.6)', borderColor:'#00d4aa', borderWidth:1, borderRadius:4}]},
+        options:{...base, scales:{...base.scales, x:{...base.scales.x, ticks:{...base.scales.x.ticks, maxTicksLimit:15}}}}
+    });
+    cHourly = new Chart(document.getElementById('chartHourly'), {
+        type:'bar', data:{labels:[], datasets:[{label:'kWh', data:[], backgroundColor:'rgba(59,130,246,.6)', borderColor:'#3b82f6', borderWidth:1, borderRadius:3}]},
+        options:{...base, scales:{...base.scales, x:{...base.scales.x, ticks:{...base.scales.x.ticks, maxTicksLimit:24}}}}
+    });
+    const di = document.getElementById('hourlyDate');
+    if (di) { di.value = new Date().toISOString().split('T')[0]; di.max = di.value; }
+}
+
+const MAX_PTS = 100;
+function pushRT(power, energy) {
+    const t = new Date().toLocaleTimeString('pt-BR', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    if (cPower) {
+        cPower.data.labels.push(t); cPower.data.datasets[0].data.push(power);
+        if (cPower.data.labels.length > MAX_PTS) { cPower.data.labels.shift(); cPower.data.datasets[0].data.shift(); }
+        cPower.update('none');
+    }
+    if (cEnergy) {
+        cEnergy.data.labels.push(t); cEnergy.data.datasets[0].data.push(energy);
+        if (cEnergy.data.labels.length > MAX_PTS) { cEnergy.data.labels.shift(); cEnergy.data.datasets[0].data.shift(); }
+        cEnergy.update('none');
+    }
+}
+
+function updateUI(data) {
+    const devs = data.devices || {};
+    const ts = new Date().toLocaleTimeString('pt-BR');
+    document.getElementById('liveDot').classList.remove('offline');
+    document.getElementById('statusText').textContent = 'Online';
+    document.getElementById('lastUpdate').textContent = ts;
+    if (data.config?.kwh_cost) {
+        kwhCost = data.config.kwh_cost;
+        document.getElementById('kwhInput').value = kwhCost;
+        document.getElementById('kwhDisplay').value = kwhCost.toFixed(3);
+    }
+    const f1 = devs.fase1;
+    if (!f1) return;
+    const P = f1.power ?? 0, V = f1.voltage ?? 0, I = f1.current ?? 0, E = f1.energy ?? 0;
+    document.getElementById('vPower').textContent = fmt(P);
+    document.getElementById('vVoltage').textContent = fmt(V);
+    document.getElementById('vCurrent').textContent = I > 0 ? I.toFixed(2) : '—';
+    document.getElementById('vEnergy').textContent = E > 0 ? E.toFixed(3) : '—';
+    document.getElementById('p1V').textContent = fmt(V);
+    document.getElementById('p1I').textContent = I > 0 ? I.toFixed(2) : '—';
+    document.getElementById('p1P').textContent = fmt(P);
+    document.getElementById('p1E').textContent = E > 0 ? E.toFixed(3) : '—';
+    pushRT(P, E);
+
+    const br = devs.breaker;
+    const isOn = br && (br.switch === true || br.switch === 'true');
+    const charging = isOn && P > 10;
+
+    // ── Breaker info ──
+    if (br) {
+        document.getElementById('brEnergy').textContent = (br.energy_kwh ?? 0).toFixed(2);
+        document.getElementById('brPhases').textContent = (br.phase_a ?? 0).toFixed(0);
+        document.getElementById('brFault').textContent = br.fault_code ?? 0;
+        document.getElementById('brTemp').textContent = (br.temperature !== undefined && br.temperature !== null) ? br.temperature : '—';
+        // Color the fault badge
+        const faultEl = document.getElementById('brFault');
+        if (br.fault_code && br.fault_code !== 0) {
+            faultEl.style.color = 'var(--danger)';
+            faultEl.style.fontWeight = '700';
+        } else {
+            faultEl.style.color = 'var(--ok)';
+            faultEl.style.fontWeight = '400';
+        }
+    }
+
+    // ── Car controls (setBreaker kept for compatibility) ──
+    document.getElementById('btnOn')?.remove();
+    document.getElementById('btnOff')?.remove();
+    document.getElementById('carIcon')?.remove();
+    document.getElementById('chargeBar')?.remove();
+    document.getElementById('chargeInfo')?.remove();
+    document.getElementById('chargeEnergy')?.remove();
+
+    // ── Car gauge ──
+    const cfg = data.config || {};
+    const soc = cfg.car_current_soc ?? 50;
+    const target = cfg.car_target_soc ?? 80;
+    const batt = cfg.car_battery_kwh ?? 12.9;
+    const power = cfg.car_charge_power_w ?? 2400;
+    const isCharging = isOn;
+
+    // Update gauge
+    const CIRC = 2 * Math.PI * 78;
+    const gaugeFill = document.getElementById('gaugeFill');
+    const gaugeTarget = document.getElementById('gaugeTarget');
+    const targetMarker = document.getElementById('targetMarker');
+    const gaugePct = document.getElementById('gaugePct');
+
+    if (gaugeFill) {
+        const offset = CIRC - (soc / 100) * CIRC;
+        gaugeFill.style.strokeDashoffset = offset;
+        gaugeFill.style.stroke = soc >= target ? '#22c55e' : '#00d4aa';
+    }
+    if (gaugeTarget) {
+        const targetOffset = CIRC - (target / 100) * CIRC;
+        const targetAngle = (target / 100) * 360;
+        gaugeTarget.style.strokeDashoffset = targetOffset;
+    }
+    if (targetMarker) {
+        const targetAngle = (target / 100) * 360;
+        const rad = (targetAngle - 90) * Math.PI / 180;
+        const r = 78;
+        const cx = 100, cy = 100;
+        const tx = cx + r * Math.cos(rad) - 2;
+        const ty = cy + r * Math.sin(rad);
+        targetMarker.style.left = tx + 'px';
+        targetMarker.style.top = (ty - 100) + 'px';
+        targetMarker.style.display = target > soc ? 'block' : 'none';
+    }
+    if (gaugePct) gaugePct.textContent = soc + '%';
+
+    // SOC input sync
+    const socIn = document.getElementById('socCurrent');
+    if (socIn && parseFloat(socIn.value) !== soc) socIn.value = soc;
+    const tgtIn = document.getElementById('socTarget');
+    if (tgtIn && parseFloat(tgtIn.value) !== target) tgtIn.value = target;
+
+    // Presets
+    document.querySelectorAll('.soc-preset').forEach(b => {
+        const v = parseInt(b.textContent);
+        b.classList.toggle('active', v === target);
+    });
+
+    // Status
+    const cs = document.getElementById('carStatus');
+    if (cs) {
+        if (isCharging && P > 10) {
+            cs.textContent = '⚡ CARREGANDO';
+            cs.className = 'car-status on';
+            cs.style.color = 'var(--ok)';
+        } else if (isCharging) {
+            cs.textContent = '🔌 LIGADO (Standby)';
+            cs.className = 'car-status on';
+            cs.style.color = 'var(--warn)';
+        } else {
+            cs.textContent = '⛔ DESLIGADO';
+            cs.className = 'car-status off';
+            cs.style.color = 'var(--danger)';
+        }
+    }
+
+    // Buttons
+    const btnStart = document.getElementById('btnStart');
+    const btnStop = document.getElementById('btnStop');
+    if (btnStart) btnStart.style.display = isCharging ? 'none' : 'flex';
+    if (btnStop) btnStop.style.display = isCharging ? 'flex' : 'none';
+
+    // Plan
+    calcAndShowPlan(soc, target, batt, power, kwhCost);
+
+    // Info bar
+    const cibB = document.getElementById('cibBattery');
+    const cibP = document.getElementById('cibPower');
+    if (cibB) cibB.textContent = batt + ' kWh';
+    if (cibP) cibP.textContent = power + ' W';
+
+    // Timer
+    updateTimer(isCharging, P, power, target, soc, batt);
+}
+
+let timerInterval = null;
+let chargeStartKwh = null;
+let chargeStartTime = null;
+let lastCharge = null;
+
+async function refreshChargeState() {
+    try {
+        const r = await fetch('/api/charge/state');
+        const c = await r.json();
+        lastCharge = c;
+        updateChargeSession(c);
+    } catch(e) { console.error('charge/state error', e); }
+}
+
+function updateChargeSession(c) {
+    const session = document.getElementById('chargeSession');
+    const idleProg = document.getElementById('csIdleProgress');
+    if (!session) return;
+
+    if (!c.charging && c.state !== 'completing') {
+        session.style.display = 'none';
+        return;
+    }
+    session.style.display = 'block';
+
+    // SOC efetivo
+    document.getElementById('csEffectiveSoc').textContent = (c.effective_soc ?? 0).toFixed(1) + '%';
+
+    // Energia entregue
+    document.getElementById('csEnergyDelivered').textContent = (c.energy_delivered_kwh ?? 0).toFixed(3) + ' kWh';
+
+    // Decorrido
+    const secs = c.elapsed_seconds || 0;
+    const hh = Math.floor(secs / 3600);
+    const mm = Math.floor((secs % 3600) / 60);
+    const ss = secs % 60;
+    document.getElementById('csElapsed').textContent =
+        hh > 0 ? `${hh}h ${String(mm).padStart(2,'0')}m` : `${mm}m ${String(ss).padStart(2,'0')}s`;
+
+    // Status
+    const stEl = document.getElementById('csStatus');
+    stEl.className = 'cs-status ' + (c.state || '');
+    stEl.textContent = c.message || c.state;
+
+    // Idle progress (countdown to auto-stop)
+    if (c.state === 'completing' && c.idle_seconds !== undefined) {
+        idleProg.style.display = 'block';
+        // Default 120s threshold; show countdown
+        const IDLE_NEEDED = 120;
+        const remaining = Math.max(0, IDLE_NEEDED - c.idle_seconds);
+        document.getElementById('csIdleCountdown').textContent = remaining;
+        document.getElementById('csIdleFill').style.width = Math.min(100, (c.idle_seconds / IDLE_NEEDED) * 100) + '%';
+    } else {
+        idleProg.style.display = 'none';
+    }
+}
+
+async function toggleAutoStop() {
+    const enabled = document.getElementById('autoStopToggle').checked;
+    try {
+        await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({car_charge_auto_stop: enabled})});
+    } catch(e) { console.error('toggleAutoStop', e); }
+}
+
+function updateTimer(isCharging, powerW, targetPower, targetSoc, currentSoc, batteryKwh) {
+    const timer = document.getElementById('chargeTimer');
+    const disp = document.getElementById('timerDisplay');
+    if (!timer || !disp) return;
+
+    if (!isCharging || powerW < 10) {
+        timer.style.display = 'none';
+        return;
+    }
+
+    timer.style.display = 'block';
+
+    // Prefer the server-provided estimated_remaining_minutes (uses real power)
+    const c = lastCharge || {};
+    let minsLeft = null;
+    if (c.estimated_remaining_minutes != null && c.estimated_remaining_minutes > 0) {
+        minsLeft = c.estimated_remaining_minutes;
+    } else {
+        // Fallback: client-side calc
+        const needKwh = Math.max(0, (targetSoc - currentSoc) / 100 * batteryKwh);
+        const hoursLeft = needKwh / Math.max(0.1, powerW / 1000);
+        minsLeft = Math.max(0, Math.round(hoursLeft * 60));
+    }
+
+    if (c.target_reached) {
+        timer.classList.add('done');
+        disp.textContent = '✅ COMPLETO';
+    } else {
+        timer.classList.remove('done');
+        const h = Math.floor(minsLeft / 60);
+        const m = Math.round(minsLeft % 60);
+        if (h > 0) disp.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
+        else disp.textContent = `${m}m`;
+    }
+}
+
+function calcAndShowPlan(soc, target, batt, power, cost) {
+    // Use effective SOC from tracker if available (more accurate during charging)
+    const effectiveSoc = (lastCharge && lastCharge.charging) ? lastCharge.effective_soc : soc;
+    const currentKwh = batt * effectiveSoc / 100;
+    const targetKwh = batt * target / 100;
+    const neededKwh = Math.max(0, targetKwh - currentKwh);
+    const hours = neededKwh / (power / 1000);
+    const costVal = neededKwh * cost;
+
+    const pk = document.getElementById('planKwh');
+    const pt = document.getElementById('planTime');
+    const pc = document.getElementById('planCost');
+    const pe = document.getElementById('planEnergy');
+    if (pk) pk.textContent = neededKwh.toFixed(2);
+    if (pt) pt.textContent = hours.toFixed(1);
+    if (pc) pc.textContent = 'R$ ' + costVal.toFixed(2);
+    if (pe) pe.textContent = target + '%';
+
+    const kpi = document.getElementById('planKwh')?.parentElement;
+    if (kpi) kpi.classList.toggle('highlight', effectiveSoc < target);
+}
+
+async function updateSoc() {
+    const v = parseFloat(document.getElementById('socCurrent')?.value);
+    if (isNaN(v)) return;
+    await fetch('/api/car/soc?soc=' + v, {method:'POST'});
+    fetchStatus();
+}
+
+async function updateTarget() {
+    const v = parseFloat(document.getElementById('socTarget')?.value);
+    if (isNaN(v)) return;
+    await fetch('/api/car/target?target=' + v, {method:'POST'});
+    fetchStatus();
+}
+
+function setTarget(v) {
+    document.getElementById('socTarget').value = v;
+    updateTarget();
+}
+
+async function startCharge() {
+    const a = document.getElementById('carAlert');
+    a.className = 'alert info'; a.textContent = '⏳ Iniciando...';
+    try {
+        const r = await fetch('/api/car/start-charge', {method:'POST'});
+        const d = await r.json();
+        if (d.success) {
+            a.className = 'alert ok'; a.textContent = '✅ Carregamento iniciado!';
+            chargeStartTime = Date.now();
+            fetchStatus();
+            setTimeout(() => a.className = 'alert', 4000);
+        } else { a.className = 'alert err'; a.textContent = '❌ ' + (d.error||'Erro'); }
+    } catch(e) { a.className = 'alert err'; a.textContent = '❌ ' + e.message; }
+}
+
+async function stopCharge() {
+    const a = document.getElementById('carAlert');
+    a.className = 'alert info'; a.textContent = '⏳ Parando...';
+    try {
+        const r = await fetch('/api/car/stop-charge', {method:'POST'});
+        const d = await r.json();
+        if (d.success) {
+            a.className = 'alert ok'; a.textContent = '⏹ Carregamento parado!';
+            fetchStatus();
+            setTimeout(() => a.className = 'alert', 4000);
+        } else { a.className = 'alert err'; a.textContent = '❌ ' + (d.error||'Erro'); }
+    } catch(e) { a.className = 'alert err'; a.textContent = '❌ ' + e.message; }
+}
+
+async function fetchStatus() {
+    try {
+        const [status, today, charge] = await Promise.all([
+            fetch('/api/status'),
+            fetch('/api/today'),
+            fetch('/api/charge/state'),
+        ]);
+        const data = await status.json(), td = await today.json();
+        const c = await charge.json();
+        lastCharge = c;
+        updateUI(data);
+        updateChargeSession(c);
+        document.getElementById('vTodayCost').textContent = fmtR(td.today_cost || 0);
+        document.getElementById('vMonthCost').textContent = fmtR(td.month_cost || 0);
+        if (td.kwh_cost) kwhCost = td.kwh_cost;
+    } catch {
+        document.getElementById('liveDot').classList.add('offline');
+        document.getElementById('statusText').textContent = 'Offline';
+    }
+}
+
+async function setBreaker(on) {
+    const a = document.getElementById('carAlert');
+    a.className = 'alert info'; a.textContent = on ? '⏳ Ligando...' : '⏳ Desligando...';
+    try {
+        const r = await fetch(`/api/breaker/switch?on=${on}`, {method:'POST'});
+        const d = await r.json();
+        if (d.success) { a.className = 'alert ok'; a.textContent = on ? '✅ LIGADO!' : '✅ DESLIGADO!'; setTimeout(()=>a.className='alert',3000); fetchStatus(); }
+        else { a.className = 'alert err'; a.textContent = '❌ ' + (d.error||'Erro'); }
+    } catch(e) { a.className = 'alert err'; a.textContent = '❌ ' + e.message; }
+}
+
+// ─── HISTORY ───
+async function loadHistory() {
+    if (!curYear) { const n = new Date(); curYear = n.getFullYear(); curMonth = n.getMonth()+1; }
+    document.getElementById('monthDisp').textContent = `${MES[curMonth-1]} ${curYear}`;
+    try {
+        const [monthly, daily] = await Promise.all([fetch(`/api/monthly?year=${curYear}&month=${curMonth}`), fetch('/api/daily-history?days=30')]);
+        const mData = await monthly.json(), dData = await daily.json();
+        renderSummary(mData);
+        renderDailyChart(dData.days);
+        renderTable(dData.days);
+    } catch(e) { console.error('History error:', e); }
+}
+
+function chgMonth(d) { curMonth+=d; if(curMonth>12){curMonth=1;curYear++} if(curMonth<1){curMonth=12;curYear--} loadHistory(); }
+function goToday() { const n=new Date(); curYear=n.getFullYear(); curMonth=n.getMonth()+1; loadHistory(); }
+
+function renderSummary(d) {
+    document.getElementById('hKwh').textContent = d.total_kwh?.toFixed(2) ?? '—';
+    document.getElementById('hCost').textContent = d.total_cost ? fmtR(d.total_cost) : '—';
+    document.getElementById('hCostKwh').textContent = `R$ ${kwhCost.toFixed(3)}/kWh`;
+    document.getElementById('hDays').textContent = d.daily?.length ?? '0';
+    const avg = d.daily?.length ? d.total_kwh / d.daily.length : 0;
+    document.getElementById('hAvg').textContent = avg.toFixed(2);
+    document.getElementById('hAvgCost').textContent = fmtR(avg * kwhCost) + '/dia';
+}
+
+function renderDailyChart(days) {
+    if (!cDaily || !days?.length) return;
+    const s = [...days].reverse();
+    cDaily.data.labels = s.map(d => d.day.split('-')[2]+'/'+d.day.split('-')[1]);
+    // Stacked bars: fase1 + breaker
+    cDaily.data.datasets = [
+        {label:'Casa (kWh)', data:s.map(d => d.fase1_kwh || d.consumed_kwh - (d.breaker_kwh||0)), backgroundColor:'rgba(0,212,170,0.7)', borderColor:'#00d4aa', borderWidth:1, borderRadius:4, stack:'stack0'},
+        {label:'Carro (kWh)', data:s.map(d => d.breaker_kwh || 0), backgroundColor:'rgba(59,130,246,0.7)', borderColor:'#3b82f6', borderWidth:1, borderRadius:4, stack:'stack0'},
+    ];
+    cDaily.options.scales.x.stacked = true;
+    cDaily.options.scales.y.stacked = true;
+    cDaily.update();
+}
+
+function renderTable(days) {
+    const tb = document.getElementById('dailyTbody');
+    if (!days?.length) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:2rem">Sem dados</td></tr>'; return; }
+    tb.innerHTML = [...days].reverse().map(d => {
+        const [y,m,day] = d.day.split('-');
+        return `<tr><td>${day}/${m}</td><td class="num">${(d.consumed_kwh||0).toFixed(3)}</td><td class="num cost">${fmtR(d.cost||0)}</td><td class="num" style="color:var(--accent2)">${(d.breaker_kwh||0).toFixed(3)} ⚡</td><td class="num" style="color:var(--accent2)">${fmtR(d.breaker_cost||0)}</td><td class="num" style="color:var(--warn)">${(d.avg_power_w||0).toFixed(0)}</td></tr>`;
+    }).join('');
+}
+
+// ─── HOURLY (cloud-first) ───
+async function loadHourly() {
+    const date = document.getElementById('hourlyDate')?.value;
+    if (!date) return;
+    try {
+        const r = await fetch(`/api/hourly?date=${date}`);
+        const d = await r.json();
+        if (cHourly && d.hours) {
+            cHourly.data.labels = d.hours.map(h => h.hour);
+            cHourly.data.datasets[0].data = d.hours.map(h => h.kwh);
+            cHourly.update();
+        }
+        const total = d.total_kwh || 0;
+        const avgW = d.hours?.length ? d.hours.reduce((s,h) => s + h.kwh, 0) / d.hours.filter(h => h.kwh > 0).length * 1000 || 0 : 0;
+        document.getElementById('hlyTotal').textContent = total.toFixed(3);
+        document.getElementById('hlyCost').textContent = fmtR(d.total_cost || 0);
+        document.getElementById('hlyAvg').textContent = (d.source === 'cloud' ? '—' : avgW.toFixed(0) + 'W');
+    } catch(e) { console.error('Hourly error:', e); }
+}
+
+// ─── CHARGES ───
+let chargePeriodDays = 7;
+
+function setChargePeriod(d) {
+    chargePeriodDays = d;
+    document.querySelectorAll('#tab-charges .soc-preset').forEach((b, i) => {
+        const map = {0:7, 1:30, 2:90, 3:365, 4:9999};
+        b.classList.toggle('active', map[i] === d);
+    });
+    loadCharges();
+}
+
+function fmtDuration(secs) {
+    secs = Math.max(0, Math.floor(secs || 0));
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    if (h > 0) return `${h}h ${String(m).padStart(2,'0')}m`;
+    return `${m}m`;
+}
+
+function fmtDateTime(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return d.toLocaleString('pt-BR', {day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit'});
+}
+
+async function loadCharges() {
+    const tb = document.getElementById('chargeTbody');
+    if (!tb) return;
+    try {
+        const [sessResp, summResp] = await Promise.all([
+            fetch('/api/charge/sessions?limit=200&include_active=true'),
+            fetch('/api/charge/summary?days=' + chargePeriodDays),
+        ]);
+        const sessions = await sessResp.json();
+        const summary = await summResp.json();
+
+        // Period label
+        const periodLabel = chargePeriodDays >= 9999 ? 'todo o período' :
+            chargePeriodDays === 365 ? 'último ano' :
+            `últimos ${chargePeriodDays} dias`;
+        document.getElementById('chargePeriodLabel').textContent = periodLabel;
+        document.getElementById('chargeSessionCount').textContent = `${summary.session_count || 0} sessões`;
+
+        // Summary cards
+        document.getElementById('csCount').textContent = summary.session_count || 0;
+        document.getElementById('csTotalKwh').textContent = (summary.total_kwh || 0).toFixed(2) + ' kWh';
+        document.getElementById('csTotalCost').textContent = 'R$ ' + (summary.total_cost || 0).toFixed(2);
+        document.getElementById('csTotalDuration').textContent = (summary.total_duration_hours || 0).toFixed(1) + ' h';
+        document.getElementById('csAvgKwh').textContent = (summary.avg_kwh_per_session || 0).toFixed(2) + ' kWh';
+        document.getElementById('csAvgCost').textContent = 'R$ ' + (summary.avg_cost_per_session || 0).toFixed(2);
+
+        // Table
+        const rows = sessions.sessions || [];
+        if (rows.length === 0) {
+            tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:2rem">Nenhum carregamento no período.</td></tr>';
+            return;
+        }
+        tb.innerHTML = rows.map(s => {
+            const kwhRate = s.duration_seconds > 0
+                ? (s.energy_delivered_kwh / (s.duration_seconds / 3600)).toFixed(2)
+                : '—';
+            const socStart = (s.soc_start ?? 0).toFixed(0);
+            const socEnd = s.soc_end != null ? s.soc_end.toFixed(0) : '—';
+            const statusLabel = ({
+                'active': 'EM ANDAMENTO',
+                'completed': 'OK',
+                'auto_stopped': 'AUTO',
+                'aborted': 'INTERROMPIDO',
+            })[s.status] || s.status;
+            return `<tr>
+                <td>${fmtDateTime(s.start_time)}</td>
+                <td class="num">${fmtDuration(s.duration_seconds)}</td>
+                <td class="num">${socStart}% → ${socEnd}%</td>
+                <td class="num">${(s.energy_delivered_kwh || 0).toFixed(2)} kWh</td>
+                <td class="num" style="color:var(--ok)">R$ ${(s.total_cost || 0).toFixed(2)}</td>
+                <td class="num">${kwhRate}</td>
+                <td><span class="status-badge ${s.status}">${statusLabel}</span></td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        console.error('loadCharges error:', e);
+        tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:2rem">Erro ao carregar sessões.</td></tr>';
+    }
+}
+
+// ─── ADMIN ───
+async function syncCloud() {
+    if (!confirm('Forçar download da cloud?')) return;
+    try { const d = await (await fetch('/api/cloud-sync',{method:'POST'})).json(); alert(JSON.stringify(d,null,2)); loadHistory(); } catch(e) { alert('Erro: '+e.message); }
+}
+async function clearDb() {
+    if (!confirm('⚠️ Apagar TODO histórico local?')) return;
+    if (!confirm('Tem certeza?')) return;
+    try { const d = await (await fetch('/api/clear-db',{method:'POST'})).json(); alert(`Removidos: ${d.deleted}`); loadHistory(); } catch(e) { alert('Erro: '+e.message); }
+}
+
+// ─── SETTINGS ───
+async function saveKwh() {
+    const v = parseFloat(document.getElementById('kwhInput').value);
+    if (isNaN(v) || v <= 0) return;
+    await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({kwh_cost:v})});
+    kwhCost = v; document.getElementById('kwhDisplay').value = v.toFixed(3);
+    const a = document.getElementById('settingsOk'); a.style.display = 'block'; setTimeout(()=>a.style.display='none',3000);
+}
+
+// Init
+initCharts();
+fetchStatus();
+loadHourly();
+setInterval(fetchStatus, POLL);
+setInterval(loadHourly, 120000);
+setInterval(() => {
+    if (document.getElementById('tab-charges')?.classList.contains('active')) loadCharges();
+}, 30000);
+// Faster polling for the charge session (every 2s) so the countdown is smooth
+setInterval(() => {
+    if (lastCharge && (lastCharge.charging || lastCharge.state === 'completing')) {
+        refreshChargeState();
+    }
+}, 2000);
+</script>
+</body>
+</html>
