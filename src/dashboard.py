@@ -1128,8 +1128,9 @@ def api_monthly(year: int, month: int):
 def api_cloud_sync():
     """Force-refresh Tuya cloud cache. Returns summary count."""
     try:
-        c = get_cloud()
-        if not c:
+        # Check that cloud is configured. We don't need the client object
+        # itself — get_cloud_logs() opens its own session per call.
+        if not get_cloud():
             return {"success": False, "error": "cloud not configured"}
         days = 7
         for dev in DEVICES.values():
@@ -1142,6 +1143,10 @@ def api_cloud_sync():
 @app.post("/api/clear-db")
 def api_clear_db(before_days: int = 30):
     """Prune old readings (keep last N days)."""
+    # Guard: negative or zero values would target the future (delete everything).
+    # Clamp to a minimum of 1 day.
+    if before_days < 1:
+        return {"success": False, "error": "before_days must be >= 1", "received": before_days}
     try:
         cutoff = (datetime.now() - timedelta(days=before_days)).isoformat()
         conn = get_db()
@@ -1409,7 +1414,6 @@ def api_config_update(cfg: dict = None):
     if rejected:
         result["rejected"] = sorted(rejected)
     return result
-    return current
 
 @app.get("/api/cloud-logs")
 def api_cloud_logs(device: str = "fase1", days: int = 2):
