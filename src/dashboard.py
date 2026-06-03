@@ -93,6 +93,43 @@ state = State()
 def get_db():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
+
+# ─── Charge history (for prediction improvement) ──────────────
+CHARGE_STATS_FILE = BASE_DIR / "data" / "charge_history.json"
+
+
+def _save_charge_stats(session_stats: dict):
+    """Append a completed charge session to the history file for future predictions."""
+    try:
+        history = []
+        if CHARGE_STATS_FILE.exists():
+            with open(CHARGE_STATS_FILE) as f:
+                history = json.load(f)
+        history.append(session_stats)
+        # Keep last 50 sessions
+        history = history[-50:]
+        with open(CHARGE_STATS_FILE, "w") as f:
+            json.dump(history, f, indent=2)
+        print(f"📊 Sessão salva no histórico: {session_stats['energy_kwh']}kWh em {session_stats['duration_min']}min")
+    except Exception as e:
+        print(f"⚠️ Erro ao salvar histórico: {e}")
+
+
+def get_avg_charge_rate() -> float:
+    """Return average charge rate (kWh/hour) from historical sessions. Fallback to config."""
+    try:
+        if CHARGE_STATS_FILE.exists():
+            with open(CHARGE_STATS_FILE) as f:
+                history = json.load(f)
+            if history:
+                rates = [s["charge_rate_kwh_per_h"] for s in history if s.get("charge_rate_kwh_per_h", 0) > 0]
+                if rates:
+                    return sum(rates) / len(rates)
+    except Exception:
+        pass
+    cfg = load_config()
+    return cfg.get("car_charge_power_w", 2400) / 1000  # fallback: config power
+
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.execute("""
@@ -407,28 +444,23 @@ def update_charge_session_progress(session_uuid, current_energy_kwh, current_soc
 
 
 def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="manual"):
-    """Mark a charge session as finished. Computes totals."""
+    """Mark a charge session as finished. Computes totals. Saves stats for future predictions."""
     conn = get_db()
     try:
         row = conn.execute(
-            """SELECT start_time, start_energy_kwh, cost_per_kwh, battery_kwh
+            """SELECT start_time, start_energy_kwh, cost_per_kwh, battery_kwh, soc_start
                FROM charge_sessions WHERE session_uuid = ?""",
             (session_uuid,),
         ).fetchone()
         if not row:
             return None
-        start_time_str, start_energy, cost_per_kwh, battery_kwh = row
+        start_time_str, start_energy, cost_per_kwh, battery_kwh, soc_start = row
         start_dt = datetime.fromisoformat(start_time_str)
         end_dt = datetime.now()
         duration = int((end_dt - start_dt).total_seconds())
         energy_delivered = max(0.0, end_energy_kwh - (start_energy or 0))
         # Avoid double-counting: also recompute soc_end from energy if not provided
         if soc_end is None and battery_kwh:
-            # Need soc_start to compute
-            soc_start_row = conn.execute(
-                "SELECT soc_start FROM charge_sessions WHERE session_uuid = ?", (session_uuid,)
-            ).fetchone()
-            soc_start = soc_start_row[0] if soc_start_row else 0
             soc_end = (soc_start or 0) + (energy_delivered / max(0.1, battery_kwh)) * 100
             soc_end = min(100.0, soc_end)
         total_cost = energy_delivered * (cost_per_kwh or 0)
@@ -441,6 +473,20 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
             (end_dt.isoformat(), end_energy_kwh, energy_delivered, duration, soc_end, total_cost, end_reason, status, session_uuid),
         )
         conn.commit()
+
+        # ── Save charge stats for future predictions ──
+        if duration > 60 and energy_delivered > 0.1:
+            _save_charge_stats({
+                "date": end_dt.strftime("%Y-%m-%d"),
+                "soc_start": soc_start,
+                "soc_end": round(soc_end, 1),
+                "energy_kwh": round(energy_delivered, 3),
+                "duration_min": round(duration / 60, 1),
+                "avg_power_w": round(energy_delivered / (duration / 3600) * 1000, 0) if duration > 0 else 0,
+                "charge_rate_kwh_per_h": round(energy_delivered / (duration / 3600), 2) if duration > 0 else 0,
+                "end_reason": end_reason,
+            })
+
         return {
             "session_uuid": session_uuid,
             "end_time": end_dt.isoformat(),
@@ -976,7 +1022,12 @@ class ChargingTracker:
             if avg_power_w > 10 and need_kwh > 0:
                 est_min = (need_kwh / (avg_power_w / 1000)) * 60
             else:
-                est_min = None
+                # Fallback: use historical charge rate
+                avg_rate = get_avg_charge_rate()  # kWh/hour
+                if avg_rate > 0 and need_kwh > 0:
+                    est_min = (need_kwh / avg_rate) * 60
+                else:
+                    est_min = None
 
             idle_seconds = 0
             if self.idle_started_at:
@@ -989,6 +1040,7 @@ class ChargingTracker:
                 "elapsed_seconds": int(elapsed),
                 "energy_delivered_kwh": round(energy_delta, 4),
                 "effective_soc": round(self.effective_soc, 1),
+                "start_soc": self.start_soc,
                 "target_soc": self.target_soc,
                 "estimated_remaining_minutes": round(est_min, 1) if est_min is not None else None,
                 "target_reached": self.effective_soc >= self.target_soc,

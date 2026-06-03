@@ -63,6 +63,7 @@
         .car-gauge .gauge-bg{fill:none;stroke:rgba(255,255,255,.1);stroke-width:12}
         .car-gauge .gauge-fill{fill:none;stroke:var(--accent);stroke-width:12;stroke-linecap:round;stroke-dasharray:490;stroke-dashoffset:490;transition:stroke-dashoffset .8s ease}
         .car-gauge .gauge-target{fill:none;stroke:var(--warn);stroke-width:4;stroke-linecap:round;stroke-dasharray:490;stroke-dashoffset:490}
+        .car-gauge .gauge-start{fill:none;stroke:var(--danger);stroke-width:3;stroke-linecap:round;stroke-dasharray:4 486;stroke-dashoffset:490;opacity:.6}
         .car-gauge-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
         .car-gauge-pct{font-size:2.2rem;font-weight:800;color:var(--accent)}
         .car-gauge-lbl{font-size:.65rem;color:var(--dim);text-transform:uppercase;margin-top:.2rem}
@@ -256,6 +257,8 @@
                             <circle class="gauge-fill" id="gaugeFill" cx="100" cy="100" r="78"
                                 stroke-dasharray="490 490" stroke-dashoffset="490" style="fill:none"/>
                             <circle class="gauge-target" id="gaugeTarget" cx="100" cy="100" r="78"
+                                stroke-dasharray="490 490" stroke-dashoffset="490" style="fill:none"/>
+                            <circle class="gauge-start" id="gaugeStart" cx="100" cy="100" r="78"
                                 stroke-dasharray="490 490" stroke-dashoffset="490" style="fill:none"/>
                         </svg>
                         <div class="car-gauge-center">
@@ -629,11 +632,16 @@ function updateUI(data) {
 
     // ── Car gauge ──
     const cfg = data.config || {};
-    const soc = cfg.car_current_soc ?? 50;
+    const manualSoc = cfg.car_current_soc ?? 50;
     const target = cfg.car_target_soc ?? 80;
     const batt = cfg.car_battery_kwh ?? 12.9;
     const power = cfg.car_charge_power_w ?? 2400;
     const isCharging = isOn;
+
+    // Use effective SOC from charge tracker when charging, manual SOC otherwise
+    const c = lastCharge || {};
+    const soc = (c.charging && c.effective_soc != null) ? Math.round(c.effective_soc * 10) / 10 : manualSoc;
+    const startSoc = c.charging ? (c.start_soc ?? manualSoc) : manualSoc;
 
     // Update gauge
     const CIRC = 2 * Math.PI * 78;
@@ -646,6 +654,15 @@ function updateUI(data) {
         const offset = CIRC - (soc / 100) * CIRC;
         gaugeFill.style.strokeDashoffset = offset;
         gaugeFill.style.stroke = soc >= target ? '#22c55e' : '#00d4aa';
+    }
+    // Start SOC marker (red dashed line showing where charge began)
+    const gaugeStart = document.getElementById('gaugeStart');
+    if (gaugeStart && c.charging) {
+        const startOffset = CIRC - (startSoc / 100) * CIRC;
+        gaugeStart.style.strokeDashoffset = startOffset;
+        gaugeStart.style.display = '';
+    } else if (gaugeStart) {
+        gaugeStart.style.display = 'none';
     }
     if (gaugeTarget) {
         const targetOffset = CIRC - (target / 100) * CIRC;
@@ -739,8 +756,11 @@ function updateChargeSession(c) {
     }
     session.style.display = 'block';
 
-    // SOC efetivo
-    document.getElementById('csEffectiveSoc').textContent = (c.effective_soc ?? 0).toFixed(1) + '%';
+    // SOC efetivo (show progression: start → current)
+    const startSocVal = c.start_soc ?? 0;
+    const currentSocVal = c.effective_soc ?? 0;
+    document.getElementById('csEffectiveSoc').textContent = 
+        startSocVal > 0 ? startSocVal.toFixed(0) + '% → ' + currentSocVal.toFixed(1) + '%' : currentSocVal.toFixed(1) + '%';
 
     // Energia entregue
     document.getElementById('csEnergyDelivered').textContent = (c.energy_delivered_kwh ?? 0).toFixed(3) + ' kWh';
@@ -1095,8 +1115,10 @@ async function saveKwh() {
 // Init
 initCharts();
 fetchStatus();
+refreshChargeState();
 loadHourly();
 setInterval(fetchStatus, POLL);
+setInterval(refreshChargeState, 5000);
 setInterval(loadHourly, 120000);
 setInterval(() => {
     if (document.getElementById('tab-charges')?.classList.contains('active')) loadCharges();

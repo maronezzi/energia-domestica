@@ -14,6 +14,7 @@ env/
 data/tuya_history.db
 data/tuya_config.json
 data/devices.json
+data/charge_history.json
 data/*.db
 data/*.sqlite
 data/*.sqlite3
