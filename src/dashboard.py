@@ -284,6 +284,8 @@ def read_breaker(d):
         _last_valid_energy_wh = energy_wh
     else:
         energy_wh = _last_valid_energy_wh
+    # DPS 1 scale=2 per Tuya spec: divide by 100 for kWh
+    # (each raw unit = 10 Wh = 0.01 kWh)
 
     # Read voltage & current from DPS 6 (updatedps returns protocol 4 data)
     voltage_v = 0.0
@@ -305,7 +307,7 @@ def read_breaker(d):
         "switch": bool(dps.get("16", False)),
         "prepayment": bool(dps.get("11", False)),
         "balance_kwh": round(_to_num(dps.get("13", 0)) / 100, 2),
-        "energy_kwh": round(energy_wh / 1000, 4) if energy_wh else 0,
+        "energy_kwh": round(energy_wh / 100, 2) if energy_wh else 0,  # scale=2 (÷100)
         "energy_wh": energy_wh,
         "fault_code": _to_num(dps.get("9", 0)),
         "voltage_v": round(voltage_v, 1),
@@ -1039,7 +1041,7 @@ def poll_loop():
                 # Use breaker's power (V×I from DPS 6) and energy (DPS 1) for charge tracking
                 br_power_w = br.get("power_w", 0) if br else 0
                 br_energy_wh = br.get("energy_wh", 0) if br else 0
-                br_energy_kwh = br_energy_wh / 1000 if br_energy_wh else 0
+                br_energy_kwh = br_energy_wh / 100 if br_energy_wh else 0
                 if br:
                     charging.update(
                         current_energy_kwh=br_energy_kwh,
@@ -1073,7 +1075,7 @@ def poll_loop():
                                 with state.lock:
                                     br_end = state.latest.get("breaker", {})
                                 end_energy_wh = br_end.get("energy_wh", 0) if br_end else 0
-                                end_energy = end_energy_wh / 1000 if end_energy_wh else 0
+                                end_energy = end_energy_wh / 100 if end_energy_wh else 0
                                 finalize_charge_session(
                                     charging.session_uuid,
                                     end_energy_kwh=end_energy,
@@ -1312,7 +1314,7 @@ def api_car_start_charge():
         cost_per_kwh = cfg.get("kwh_cost", 0.956)
         # Use breaker energy counter (Wh) for session tracking
         start_energy_wh = br.get("energy_wh", 0)
-        start_energy = start_energy_wh / 1000 if start_energy_wh else 0
+        start_energy = start_energy_wh / 100 if start_energy_wh else 0
         session = create_charge_session(
             soc_start=cfg.get("car_current_soc", 50),
             soc_target=cfg.get("car_target_soc", 80),
@@ -1355,7 +1357,7 @@ def api_car_stop_charge():
             with state.lock:
                 br_end = state.latest.get("breaker", {})
             end_energy_wh = br_end.get("energy_wh", 0) if br_end else 0
-            end_energy = end_energy_wh / 1000 if end_energy_wh else 0
+            end_energy = end_energy_wh / 100 if end_energy_wh else 0
             result = finalize_charge_session(
                 charging.session_uuid,
                 end_energy_kwh=end_energy,
@@ -1570,7 +1572,7 @@ if __name__ == "__main__":
                 start_soc=_cfg.get("car_current_soc", 50),
                 target_soc=_cfg.get("car_target_soc", 80),
                 battery_kwh=_cfg.get("car_battery_kwh", 12.9),
-                start_energy_kwh=_start_wh / 1000 if _start_wh else 0,
+                start_energy_kwh=_start_wh / 100 if _start_wh else 0,
             )
             charging.start_time = datetime.fromisoformat(_cfg["car_charge_start_time"])
             print(f"🔄 Sessão recuperada da config: SOC {_cfg.get('car_current_soc')}% → {_cfg.get('car_target_soc')}%")
