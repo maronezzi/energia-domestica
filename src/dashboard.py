@@ -1531,23 +1531,49 @@ if __name__ == "__main__":
 ╚══════════════════════════════════════════════════════════╝
     """)
 
-    # Recover active charge session from config (survives service restarts)
+    # Recover active charge session from DB (survives service restarts)
     _cfg = load_config()
-    if _cfg.get("car_charging") and _cfg.get("car_charge_start_time"):
-        _start_wh = 0
+    if _cfg.get("car_charging"):
+        _conn = get_db()
         try:
-            _d = connect_device(DEVICES["breaker"])
-            _br = read_breaker(_d)
-            _start_wh = _br.get("energy_wh", 0)
-        except Exception:
-            pass
-        charging.start(
-            start_soc=_cfg.get("car_current_soc", 50),
-            target_soc=_cfg.get("car_target_soc", 80),
-            battery_kwh=_cfg.get("car_battery_kwh", 12.9),
-            start_energy_kwh=_start_wh / 1000 if _start_wh else 0,
-        )
-        print(f"🔄 Sessão de carregamento recuperada: SOC {_cfg.get('car_current_soc')}% → {_cfg.get('car_target_soc')}%")
+            _row = _conn.execute(
+                "SELECT session_uuid, start_time, soc_start, soc_target, battery_kwh, start_energy_kwh, cost_per_kwh"
+                " FROM charge_sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            _conn.close()
+
+        if _row:
+            _uuid, _start_ts, _soc_start, _soc_target, _bat, _start_e, _cost = _row
+            # Restore tracker state from DB session
+            charging.start(
+                start_soc=_soc_start,
+                target_soc=_soc_target,
+                battery_kwh=_bat,
+                start_energy_kwh=_start_e,
+                session_uuid=_uuid,
+            )
+            # Override start_time to the DB session's real start
+            charging.start_time = datetime.fromisoformat(_start_ts)
+            elapsed_min = (datetime.now() - charging.start_time).total_seconds() / 60
+            print(f"🔄 Sessão recuperada do DB: {_soc_start}% → {_soc_target}% (já decorrido: {elapsed_min:.0f} min)")
+        elif _cfg.get("car_charge_start_time"):
+            # Fallback: config has start_time but no DB session — start fresh
+            _start_wh = 0
+            try:
+                _d = connect_device(DEVICES["breaker"])
+                _br = read_breaker(_d)
+                _start_wh = _br.get("energy_wh", 0)
+            except Exception:
+                pass
+            charging.start(
+                start_soc=_cfg.get("car_current_soc", 50),
+                target_soc=_cfg.get("car_target_soc", 80),
+                battery_kwh=_cfg.get("car_battery_kwh", 12.9),
+                start_energy_kwh=_start_wh / 1000 if _start_wh else 0,
+            )
+            charging.start_time = datetime.fromisoformat(_cfg["car_charge_start_time"])
+            print(f"🔄 Sessão recuperada da config: SOC {_cfg.get('car_current_soc')}% → {_cfg.get('car_target_soc')}%")
 
     threading.Thread(target=poll_loop, daemon=True).start()
     # Bind address:
