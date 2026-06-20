@@ -18,14 +18,16 @@ from datetime import datetime
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S"
+    datefmt="%H:%M:%S",
 )
 log = logging.getLogger("tuya-monitor")
 
 try:
     import tinytuya
 except ImportError:
-    log.error("Instale tinytuya: pip install tinytuya pycryptodome --break-system-packages")
+    log.error(
+        "Instale tinytuya: pip install tinytuya pycryptodome --break-system-packages"
+    )
     raise SystemExit(1)
 
 
@@ -35,6 +37,7 @@ CONFIG_FILE = "tuya_devices.json"
 # ──────────────────────────────────────────────────────────────
 # PASSO 1: ESCANEIA A REDE
 # ──────────────────────────────────────────────────────────────
+
 
 def scan_network(timeout=18):
     """Escaneia a rede em busca de dispositivos Tuya (UDP broadcast)."""
@@ -89,7 +92,9 @@ def scan_network(timeout=18):
     # Salva pra uso posterior (sem Local Key ainda — ela vem da Cloud)
     save_devices(devices)
     log.info(f"💾 IPs salvos em {CONFIG_FILE}")
-    log.info("⚠️  Para ler dados, você precisa da Local Key (obtenha em https://iot.tuya.com)")
+    log.info(
+        "⚠️  Para ler dados, você precisa da Local Key (obtenha em https://iot.tuya.com)"
+    )
 
     return devices
 
@@ -97,6 +102,7 @@ def scan_network(timeout=18):
 # ──────────────────────────────────────────────────────────────
 # PASSO 2: EXTRAI DADOS DE ENERGIA
 # ──────────────────────────────────────────────────────────────
+
 
 def extract_energy_data(dev_id, dev_ip, dev_key, version="3.3"):
     """Conecta no medidor Tuya via TCP local e lê todos os DPS."""
@@ -122,18 +128,18 @@ def extract_energy_data(dev_id, dev_ip, dev_key, version="3.3"):
 
         # DPS comuns de medidor de energia
         dps_labels = {
-            1:   ("Liga/Desliga", ""),
-            17:  ("Tensão (V)", "V"),
-            18:  ("Corrente (A)", "A"),
-            19:  ("Potência Instantânea (W)", "W"),
-            20:  ("Energia Total (kWh)", "kWh"),
-            21:  ("Frequência (Hz)", "Hz"),
-            22:  ("Potência Aparente (VA)", "VA"),
-            23:  ("Fator de Potência", ""),
-            45:  ("Energia Dia Atual (kWh)", "kWh"),
-            46:  ("Energia Dia Anterior (kWh)", "kWh"),
-            47:  ("Energia Mês Atual (kWh)", "kWh"),
-            48:  ("Energia Mês Anterior (kWh)", "kWh"),
+            1: ("Liga/Desliga", ""),
+            17: ("Energia Total (kWh)", "kWh"),
+            18: ("Corrente (A)", "A"),
+            19: ("Potência Instantânea (W)", "W"),
+            20: ("Tensão (V)", "V"),
+            21: ("Frequência (Hz)", "Hz"),
+            22: ("Potência Aparente (VA)", "VA"),
+            23: ("Fator de Potência", ""),
+            45: ("Energia Dia Atual (kWh)", "kWh"),
+            46: ("Energia Dia Anterior (kWh)", "kWh"),
+            47: ("Energia Mês Atual (kWh)", "kWh"),
+            48: ("Energia Mês Anterior (kWh)", "kWh"),
             101: ("Potência Ativa (W)", "W"),
             102: ("Energia Reativa (kVarh)", "kVarh"),
             103: ("Potência Reativa (Var)", "Var"),
@@ -147,7 +153,7 @@ def extract_energy_data(dev_id, dev_ip, dev_key, version="3.3"):
                 # Ajuste de escala: tensão Tuya vem x10
                 display_val = val
                 if dps_num == 20 and isinstance(val, (int, float)) and val > 1000:
-                    display_val = f"{val/10:.1f}"
+                    display_val = f"{val / 10:.1f}"
                     unit = "V (x10→real)"
                 print(f"  ║  DPS[{dps_num:>3}] {label:<32} {display_val} {unit}")
                 found_any = True
@@ -170,6 +176,7 @@ def extract_energy_data(dev_id, dev_ip, dev_key, version="3.3"):
 # PASSO 3: MONITORA EM TEMPO REAL
 # ──────────────────────────────────────────────────────────────
 
+
 def monitor_device(dev_id, dev_ip, dev_key, version="3.3", interval=5, csv=False):
     """Loop contínuo lendo dados do medidor."""
     log.info(f"📡 Monitorando {dev_id} @ {dev_ip} (intervalo={interval}s)")
@@ -187,9 +194,13 @@ def monitor_device(dev_id, dev_ip, dev_key, version="3.3", interval=5, csv=False
             csv_file = f"energy_log_{dev_id}_{datetime.now().strftime('%Y%m%d')}.csv"
             if not os.path.exists(csv_file):
                 with open(csv_file, "w") as f:
-                    f.write("timestamp,voltage_V,current_A,power_W,energy_kWh,frequency_Hz\n")
+                    f.write(
+                        "timestamp,voltage_V,current_A,power_W,energy_kWh,frequency_Hz\n"
+                    )
 
-        print(f"\n{'TIME':<10} {'VOLTAGE':>10} {'CURRENT':>10} {'POWER':>10} {'ENERGY':>10} {'FREQ':>8}")
+        print(
+            f"\n{'TIME':<10} {'VOLTAGE':>10} {'CURRENT':>10} {'POWER':>10} {'ENERGY':>10} {'FREQ':>8}"
+        )
         print("-" * 65)
 
         while True:
@@ -200,15 +211,19 @@ def monitor_device(dev_id, dev_ip, dev_key, version="3.3", interval=5, csv=False
                 ts = datetime.now().strftime("%H:%M:%S")
                 voltage = dps.get("17", dps.get(17, "?"))
                 current = dps.get("18", dps.get(18, "?"))
-                power   = dps.get("19", dps.get(19, "?"))
-                energy  = dps.get("20", dps.get(20, "?"))
-                freq    = dps.get("21", dps.get(21, "?"))
+                power = dps.get("19", dps.get(19, "?"))
+                energy = dps.get("20", dps.get(20, "?"))
+                freq = dps.get("21", dps.get(21, "?"))
 
-                print(f"{ts:<10} {str(voltage):>10} {str(current):>10} {str(power):>10} {str(energy):>10} {str(freq):>8}")
+                print(
+                    f"{ts:<10} {str(voltage):>10} {str(current):>10} {str(power):>10} {str(energy):>10} {str(freq):>8}"
+                )
 
                 if csv_file:
                     with open(csv_file, "a") as f:
-                        f.write(f"{datetime.now().isoformat()},{voltage},{current},{power},{energy},{freq}\n")
+                        f.write(
+                            f"{datetime.now().isoformat()},{voltage},{current},{power},{energy},{freq}\n"
+                        )
 
                 time.sleep(interval)
 
@@ -225,6 +240,7 @@ def monitor_device(dev_id, dev_ip, dev_key, version="3.3", interval=5, csv=False
 # ──────────────────────────────────────────────────────────────
 # UTILITÁRIOS
 # ──────────────────────────────────────────────────────────────
+
 
 def save_devices(devices):
     """Salva dispositivos em JSON (sem Local Key — usar Tuya IoT Cloud pra obtê-la)."""
@@ -244,11 +260,11 @@ def load_devices():
 def add_device_manually():
     """Pede IP, Device ID e Local Key ao usuário."""
     print("\n📋 Adicionar dispositivo manualmente:")
-    ip      = input("  IP do dispositivo: ").strip()
-    dev_id  = input("  Device ID: ").strip()
+    ip = input("  IP do dispositivo: ").strip()
+    dev_id = input("  Device ID: ").strip()
     local_key = input("  Local Key (da Tuya Cloud): ").strip()
-    version  = input("  Versão protocolo (ENTER=3.3): ").strip() or "3.3"
-    name     = input("  Nome (opcional): ").strip() or f"Tuya_{ip.replace('.', '_')}"
+    version = input("  Versão protocolo (ENTER=3.3): ").strip() or "3.3"
+    name = input("  Nome (opcional): ").strip() or f"Tuya_{ip.replace('.', '_')}"
 
     d = {
         "ip": ip,
@@ -270,6 +286,7 @@ def add_device_manually():
 # ──────────────────────────────────────────────────────────────
 # MENU INTERATIVO
 # ──────────────────────────────────────────────────────────────
+
 
 def interactive_menu():
     while True:
@@ -297,7 +314,9 @@ def interactive_menu():
             else:
                 for i, d in enumerate(devices, 1):
                     has_key = "🔑" if d.get("key") else "⚠️ "
-                    print(f"  {i}. {has_key} {d.get('name','?')} | {d.get('ip','?')} | {d.get('id','?')}")
+                    print(
+                        f"  {i}. {has_key} {d.get('name', '?')} | {d.get('ip', '?')} | {d.get('id', '?')}"
+                    )
 
         elif choice == "3":
             add_device_manually()
@@ -308,11 +327,13 @@ def interactive_menu():
                 print("Nenhum dispositivo salvo. Escaneie primeiro (opção 1).")
                 continue
             for i, d in enumerate(devices, 1):
-                print(f"  {i}. {d.get('name','?')} | {d.get('ip','?')}")
+                print(f"  {i}. {d.get('name', '?')} | {d.get('ip', '?')}")
 
             if not any(d.get("key") for d in devices):
                 print("\n⚠️  Nenhum dispositivo tem Local Key.")
-                print("   Obtenha em: https://iot.tuya.com → Cloud → Devices → Query Device Details")
+                print(
+                    "   Obtenha em: https://iot.tuya.com → Cloud → Devices → Query Device Details"
+                )
                 cont = input("   Continuar mesmo assim? (s/n): ").strip().lower()
                 if cont != "s":
                     continue
@@ -324,7 +345,9 @@ def interactive_menu():
                     print("⚠️  Sem Local Key — não será possível ler dados.")
                     print("   get local key em: https://iot.tuya.com/cloud/")
                 else:
-                    extract_energy_data(d["id"], d["ip"], d["key"], d.get("version","3.3"))
+                    extract_energy_data(
+                        d["id"], d["ip"], d["key"], d.get("version", "3.3")
+                    )
             except (ValueError, IndexError):
                 print("Seleção inválida.")
 
@@ -337,11 +360,13 @@ def interactive_menu():
             # Só mostra os que têm key
             with_key = [d for d in devices if d.get("key")]
             if not with_key:
-                print("⚠️  Nenhum dispositivo tem Local Key. Adicione manualmente (opção 3).")
+                print(
+                    "⚠️  Nenhum dispositivo tem Local Key. Adicione manualmente (opção 3)."
+                )
                 continue
 
             for i, d in enumerate(with_key, 1):
-                print(f"  {i}. {d.get('name','?')} | {d.get('ip','?')}")
+                print(f"  {i}. {d.get('name', '?')} | {d.get('ip', '?')}")
 
             sel = input("Escolha o número (Enter=1): ").strip() or "1"
             interval = input("Intervalo em segundos (Enter=5): ").strip() or "5"
@@ -349,7 +374,14 @@ def interactive_menu():
 
             try:
                 d = with_key[int(sel) - 1]
-                monitor_device(d["id"], d["ip"], d["key"], d.get("version","3.3"), int(interval), csv=csv_opt)
+                monitor_device(
+                    d["id"],
+                    d["ip"],
+                    d["key"],
+                    d.get("version", "3.3"),
+                    int(interval),
+                    csv=csv_opt,
+                )
             except (ValueError, IndexError):
                 print("Seleção inválida.")
 
@@ -360,9 +392,13 @@ def interactive_menu():
                 continue
             for d in devices:
                 if d.get("key"):
-                    extract_energy_data(d["id"], d["ip"], d["key"], d.get("version","3.3"))
+                    extract_energy_data(
+                        d["id"], d["ip"], d["key"], d.get("version", "3.3")
+                    )
                 else:
-                    print(f"\n⚠️  {d.get('name','?')} ({d.get('ip','?')}) — sem Local Key")
+                    print(
+                        f"\n⚠️  {d.get('name', '?')} ({d.get('ip', '?')}) — sem Local Key"
+                    )
                 time.sleep(1)
 
         elif choice == "0":
@@ -384,17 +420,27 @@ Exemplos:
   python3 tuya_monitor.py --read --id YOUR_DEVICE_ID --ip 192.168.1.100 --key YOUR_LOCAL_KEY
   python3 tuya_monitor.py --monitor --id YOUR_DEVICE_ID --ip 192.168.1.100 --key YOUR_LOCAL_KEY --interval 10 --csv
   python3 tuya_monitor.py --menu
-        """
+        """,
     )
-    parser.add_argument("--scan", action="store_true", help="Escanear rede local em busca de dispositivos Tuya")
+    parser.add_argument(
+        "--scan",
+        action="store_true",
+        help="Escanear rede local em busca de dispositivos Tuya",
+    )
     parser.add_argument("--read", action="store_true", help="Ler dados uma vez")
-    parser.add_argument("--monitor", action="store_true", help="Monitoramento contínuo em tempo real")
+    parser.add_argument(
+        "--monitor", action="store_true", help="Monitoramento contínuo em tempo real"
+    )
     parser.add_argument("--menu", action="store_true", help="Menu interativo")
     parser.add_argument("--id", dest="dev_id", help="Device ID do dispositivo")
     parser.add_argument("--ip", dest="dev_ip", help="IP local do dispositivo")
     parser.add_argument("--key", dest="dev_key", help="Local Key (da Tuya Cloud)")
-    parser.add_argument("--version", default="3.3", help="Versão do protocolo (padrão: 3.3)")
-    parser.add_argument("--interval", type=int, default=5, help="Intervalo em segundos (padrão: 5)")
+    parser.add_argument(
+        "--version", default="3.3", help="Versão do protocolo (padrão: 3.3)"
+    )
+    parser.add_argument(
+        "--interval", type=int, default=5, help="Intervalo em segundos (padrão: 5)"
+    )
     parser.add_argument("--csv", action="store_true", help="Salvar leituras em CSV")
     parser.add_argument("--debug", action="store_true", help="Ativar debug verbose")
 
@@ -416,7 +462,14 @@ Exemplos:
         if not args.dev_id or not args.dev_ip or not args.dev_key:
             print("--monitor requer --id, --ip e --key")
             raise SystemExit(1)
-        monitor_device(args.dev_id, args.dev_ip, args.dev_key, args.version, args.interval, args.csv)
+        monitor_device(
+            args.dev_id,
+            args.dev_ip,
+            args.dev_key,
+            args.version,
+            args.interval,
+            args.csv,
+        )
 
     elif args.menu or len(vars(args)) == 0:
         interactive_menu()

@@ -5,6 +5,7 @@ Roda em: http://localhost:8050
 
 LOCAL-FIRST: Coleta local ativa, cloud opcional sob demanda do usuário.
 """
+
 import json
 import sqlite3
 import threading
@@ -25,7 +26,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent  # Project root (one level abo
 DB_FILE = BASE_DIR / "data" / "tuya_history.db"
 CONFIG_FILE = BASE_DIR / "data" / "tuya_config.json"
 
-print(f"📁 Database: {DB_FILE} ({os.path.getsize(DB_FILE) if DB_FILE.exists() else 0} bytes)")
+print(
+    f"📁 Database: {DB_FILE} ({os.path.getsize(DB_FILE) if DB_FILE.exists() else 0} bytes)"
+)
 
 
 def _load_devices():
@@ -36,7 +39,9 @@ def _load_devices():
         with open(devices_path) as f:
             return json.load(f)
     if example_path.exists():
-        print(f"⚠️  No data/devices.json found. Copy src/devices.example.json → data/devices.json and fill in your credentials.")
+        print(
+            f"⚠️  No data/devices.json found. Copy src/devices.example.json → data/devices.json and fill in your credentials."
+        )
     return {}
 
 
@@ -76,6 +81,7 @@ DEFAULT_CONFIG = {
 }
 DB_MAX_ROWS = 200000
 
+
 # ─── State (thread-safe) ────────────────────────────────────────
 class State:
     def __init__(self):
@@ -85,6 +91,7 @@ class State:
     def update(self, key, data):
         with self.lock:
             self.latest[key] = data
+
 
 state = State()
 
@@ -110,7 +117,9 @@ def _save_charge_stats(session_stats: dict):
         history = history[-50:]
         with open(CHARGE_STATS_FILE, "w") as f:
             json.dump(history, f, indent=2)
-        print(f"📊 Sessão salva no histórico: {session_stats['energy_kwh']}kWh em {session_stats['duration_min']}min")
+        print(
+            f"📊 Sessão salva no histórico: {session_stats['energy_kwh']}kWh em {session_stats['duration_min']}min"
+        )
     except Exception as e:
         print(f"⚠️ Erro ao salvar histórico: {e}")
 
@@ -122,13 +131,18 @@ def get_avg_charge_rate() -> float:
             with open(CHARGE_STATS_FILE) as f:
                 history = json.load(f)
             if history:
-                rates = [s["charge_rate_kwh_per_h"] for s in history if s.get("charge_rate_kwh_per_h", 0) > 0]
+                rates = [
+                    s["charge_rate_kwh_per_h"]
+                    for s in history
+                    if s.get("charge_rate_kwh_per_h", 0) > 0
+                ]
                 if rates:
                     return sum(rates) / len(rates)
     except Exception:
         pass
     cfg = load_config()
     return cfg.get("car_charge_power_w", 2400) / 1000  # fallback: config power
+
 
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -148,7 +162,9 @@ def init_db():
         )
     """)
     # Migrations: add new columns if upgrading from old schema
-    cur_cols = {row[1] for row in conn.execute("PRAGMA table_info(readings)").fetchall()}
+    cur_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(readings)").fetchall()
+    }
     migrations = [
         ("breaker_prepay", "INTEGER"),
         ("breaker_fault", "INTEGER"),
@@ -159,7 +175,9 @@ def init_db():
         if col not in cur_cols:
             conn.execute(f"ALTER TABLE readings ADD COLUMN {col} {typ}")
             print(f"DB migration: added column {col}")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_device_time ON readings(device, timestamp)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_time ON readings(device, timestamp)"
+    )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS daily_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,7 +187,9 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshot_date_dev ON daily_snapshots(snapshot_date, device)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshot_date_dev ON daily_snapshots(snapshot_date, device)"
+    )
     # ── Charge sessions (each car-charging session) ──
     conn.execute("""
         CREATE TABLE IF NOT EXISTS charge_sessions (
@@ -192,10 +212,15 @@ def init_db():
             end_reason TEXT  -- 'manual', 'auto', 'fault', 'user', etc.
         )
     """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_charge_start ON charge_sessions(start_time DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_charge_status ON charge_sessions(status)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_charge_start ON charge_sessions(start_time DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_charge_status ON charge_sessions(status)"
+    )
     conn.commit()
     conn.close()
+
 
 def prune_db():
     try:
@@ -203,12 +228,15 @@ def prune_db():
         count = conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0]
         if count > DB_MAX_ROWS:
             excess = count - DB_MAX_ROWS
-            conn.execute(f"DELETE FROM readings WHERE id IN (SELECT id FROM readings ORDER BY id LIMIT {excess})")
+            conn.execute(
+                f"DELETE FROM readings WHERE id IN (SELECT id FROM readings ORDER BY id LIMIT {excess})"
+            )
             conn.commit()
             print(f"DB pruned: removed {excess} rows")
         conn.close()
     except Exception as e:
         print(f"DB prune error: {e}")
+
 
 init_db()
 
@@ -220,6 +248,7 @@ def load_config():
             return {**DEFAULT_CONFIG, **json.load(f)}
     return DEFAULT_CONFIG.copy()
 
+
 def save_config(cfg):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
@@ -228,6 +257,7 @@ def save_config(cfg):
 # ─── Tuya Cloud (disabled by default) ─────────────────────────────────
 _cached_cloud = None
 _cloud_cache = {}
+
 
 def get_cloud():
     global _cached_cloud
@@ -239,19 +269,20 @@ def get_cloud():
         )
     return _cached_cloud
 
+
 def get_cloud_logs(device_id, days=2, use_cache=True):
     """Cloud fetch - only used when cloud_enabled=True"""
     cfg = load_config()
     if not cfg.get("cloud_enabled", False):
         return []
-    
+
     key = f"{device_id}_{days}"
     now = time.time()
     if use_cache and key in _cloud_cache:
         ts, data = _cloud_cache[key]
         if now - ts < 600:
             return data
-    
+
     try:
         cloud = get_cloud()
         result = cloud.getdevicelog(device_id, days)
@@ -266,7 +297,10 @@ def get_cloud_logs(device_id, days=2, use_cache=True):
 
 # ─── Device reads ──────────────────────────────────────────────
 def connect_device(cfg):
-    return tinytuya.Device(cfg["id"], address=cfg["ip"], local_key=cfg["key"], version=cfg["version"])
+    return tinytuya.Device(
+        cfg["id"], address=cfg["ip"], local_key=cfg["key"], version=cfg["version"]
+    )
+
 
 def _to_num(v, default=0):
     """Safely coerce a Tuya DPS value (often int/str/None) to float."""
@@ -290,6 +324,7 @@ def read_fase1(d):
         "power": round(p_raw / 10, 1),
         "energy": round(e_raw / 1000, 4),
     }
+
 
 _last_valid_energy_wh = 0  # cache for DPS 1 communication errors
 
@@ -370,15 +405,21 @@ def save_reading(f1, br):
                 phase_a, phase_b, phase_c)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                datetime.now().isoformat(), "fase1",
-                f1.get("voltage"), f1.get("current"), f1.get("power"), f1.get("energy"),
+                datetime.now().isoformat(),
+                "fase1",
+                f1.get("voltage"),
+                f1.get("current"),
+                f1.get("power"),
+                f1.get("energy"),
                 1 if br.get("switch") else 0,
                 1 if br.get("prepayment") else 0,
                 br.get("energy_kwh"),
                 br.get("fault_code"),
                 br.get("balance_kwh"),
                 br.get("alarm_temperature_c"),
-                br.get("voltage_v"), br.get("current_a"), br.get("power_w"),
+                br.get("voltage_v"),
+                br.get("current_a"),
+                br.get("power_w"),
             ),
         )
         conn.commit()
@@ -386,11 +427,160 @@ def save_reading(f1, br):
         conn.close()
 
 
+def _kwh_from_power_integral(rows):
+    """Integrate power (W) over time (s) from a list of (timestamp, power_w) rows.
+    Sanity-cap gaps at 120s to ignore overnight disconnects."""
+    total = 0.0
+    for i in range(1, len(rows)):
+        t1, p1 = rows[i - 1]
+        t2, p2 = rows[i]
+        dt_s = (datetime.fromisoformat(t2) - datetime.fromisoformat(t1)).total_seconds()
+        if 0 < dt_s < 120:
+            avg_w = (p1 + p2) / 2
+            if avg_w > 0:
+                total += (avg_w / 1000) * (dt_s / 3600)
+    return total
+
+
+def _backfill_snapshots_from_readings():
+    """Reconstruct daily_snapshots from existing power readings (fase1 + breaker).
+    Idempotent via gate `snapshots_backfilled` in config — runs once per install.
+    On first run, replaces legacy placeholders (0.001) and cumulative-counter
+    artifacts (>= 100 kWh/day on breaker) with real power×time integrals.
+    """
+    _cfg = load_config()
+    if _cfg.get("snapshots_backfilled"):
+        return  # already done
+    will_mark_done = True
+
+    conn = get_db()
+    try:
+        # Aggregate power per day for fase1
+        f1_rows = conn.execute(
+            "SELECT DATE(timestamp) AS day, timestamp, power FROM readings "
+            "WHERE device='fase1' AND power IS NOT NULL ORDER BY timestamp"
+        ).fetchall()
+        br_rows = conn.execute(
+            "SELECT DATE(timestamp) AS day, timestamp, phase_c FROM readings "
+            "WHERE device='fase1' AND phase_c IS NOT NULL ORDER BY timestamp"
+        ).fetchall()
+
+        # Group by day
+        from collections import defaultdict
+
+        f1_by_day = defaultdict(list)
+        for day, ts, p in f1_rows:
+            f1_by_day[day].append((ts, p or 0))
+        br_by_day = defaultdict(list)
+        for day, ts, p in br_rows:
+            br_by_day[day].append((ts, p or 0))
+
+        days = sorted(set(f1_by_day.keys()) | set(br_by_day.keys()))
+        # Include today too (in-progress day). The poll_loop will close it properly at next-day rollover
+        # and overwrite if needed (but we want a real number for the current day's chart bar).
+        n_f1, n_br = 0, 0
+        for day in days:
+            f1_kwh = (
+                round(_kwh_from_power_integral(f1_by_day[day]), 4)
+                if f1_by_day[day]
+                else 0
+            )
+            br_kwh = (
+                round(_kwh_from_power_integral(br_by_day[day]), 4)
+                if br_by_day.get(day)
+                else 0
+            )
+
+            if f1_kwh > 0:
+                existing = conn.execute(
+                    "SELECT energy_kwh FROM daily_snapshots WHERE snapshot_date=? AND device='fase1'",
+                    (day,),
+                ).fetchone()
+                # Treat existing=0 (or <0.01, the legacy placeholder) as missing
+                is_placeholder = existing is None or (
+                    existing[0] is not None and existing[0] < 0.01
+                )
+                if is_placeholder:
+                    if existing is None:
+                        conn.execute(
+                            "INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, created_at) VALUES (?, 'fase1', ?, ?)",
+                            (day, f1_kwh, datetime.now().isoformat()),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE daily_snapshots SET energy_kwh=?, created_at=? WHERE snapshot_date=? AND device='fase1'",
+                            (f1_kwh, datetime.now().isoformat(), day),
+                        )
+                n_f1 += 1
+
+            if br_kwh > 0:
+                existing_br = conn.execute(
+                    "SELECT energy_kwh FROM daily_snapshots WHERE snapshot_date=? AND device='breaker'",
+                    (day,),
+                ).fetchone()
+                # Treat suspiciously large breaker values (>= 100 kWh/day) as cumulative-counter artifacts.
+                # If we have a real integral, ALWAYS overwrite these artifacts (even if 0 kWh — means "no car charging that day").
+                is_cumulative_artifact = (
+                    existing_br is not None
+                    and existing_br[0] is not None
+                    and existing_br[0] >= 100
+                )
+                is_placeholder_br = (
+                    existing_br is None
+                    or (existing_br[0] is not None and existing_br[0] < 0.01)
+                    or is_cumulative_artifact
+                )
+                if is_placeholder_br:
+                    if existing_br is None:
+                        conn.execute(
+                            "INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, created_at) VALUES (?, 'breaker', ?, ?)",
+                            (day, br_kwh, datetime.now().isoformat()),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE daily_snapshots SET energy_kwh=?, created_at=? WHERE snapshot_date=? AND device='breaker'",
+                            (br_kwh, datetime.now().isoformat(), day),
+                        )
+                n_br += 1
+            else:
+                # No real integral data for breaker that day — but if legacy shows a
+                # cumulative artifact (>= 100 kWh/day), zero it out so history isn't polluted.
+                existing_br = conn.execute(
+                    "SELECT energy_kwh FROM daily_snapshots WHERE snapshot_date=? AND device='breaker'",
+                    (day,),
+                ).fetchone()
+                if (
+                    existing_br is not None
+                    and existing_br[0] is not None
+                    and existing_br[0] >= 100
+                ):
+                    conn.execute(
+                        "UPDATE daily_snapshots SET energy_kwh=0, created_at=? WHERE snapshot_date=? AND device='breaker'",
+                        (datetime.now().isoformat(), day),
+                    )
+        conn.commit()
+        total = conn.execute("SELECT COUNT(*) FROM daily_snapshots").fetchone()[0]
+        print(
+            f"📸 Backfill inicial: {n_f1} dias fase1, {n_br} dias breaker. Tabela: {total} linhas"
+        )
+
+        # Mark as done
+        if will_mark_done:
+            _cfg["snapshots_backfilled"] = True
+            save_config(_cfg)
+    except Exception as e:
+        print(f"⚠️ Backfill error: {e}")
+    finally:
+        conn.close()
+
 
 # ─── Charge session DB helpers ─────────────────────────────────
 import uuid as _uuid
 
-def create_charge_session(soc_start, soc_target, battery_kwh, start_energy_kwh, cost_per_kwh):
+
+def create_charge_session(
+    soc_start, soc_target, battery_kwh, start_energy_kwh, cost_per_kwh
+):
     """Insert a new active charge session. Returns the session dict (with id, uuid)."""
     session_uuid = str(_uuid.uuid4())
     now = datetime.now().isoformat()
@@ -401,7 +591,15 @@ def create_charge_session(soc_start, soc_target, battery_kwh, start_energy_kwh, 
                (session_uuid, start_time, status, soc_start, soc_target, battery_kwh,
                 start_energy_kwh, cost_per_kwh)
                VALUES (?, ?, 'active', ?, ?, ?, ?, ?)""",
-            (session_uuid, now, soc_start, soc_target, battery_kwh, start_energy_kwh, cost_per_kwh),
+            (
+                session_uuid,
+                now,
+                soc_start,
+                soc_target,
+                battery_kwh,
+                start_energy_kwh,
+                cost_per_kwh,
+            ),
         )
         conn.commit()
         return {
@@ -419,7 +617,9 @@ def create_charge_session(soc_start, soc_target, battery_kwh, start_energy_kwh, 
         conn.close()
 
 
-def update_charge_session_progress(session_uuid, current_energy_kwh, current_soc, duration_seconds, avg_power_w):
+def update_charge_session_progress(
+    session_uuid, current_energy_kwh, current_soc, duration_seconds, avg_power_w
+):
     """Update an in-progress session with the latest readings (called periodically)."""
     conn = get_db()
     try:
@@ -436,7 +636,13 @@ def update_charge_session_progress(session_uuid, current_energy_kwh, current_soc
             """UPDATE charge_sessions
                SET energy_delivered_kwh = ?, soc_end = ?, duration_seconds = ?, avg_power_w = ?
                WHERE session_uuid = ?""",
-            (energy_delivered, current_soc, duration_seconds, avg_power_w, session_uuid),
+            (
+                energy_delivered,
+                current_soc,
+                duration_seconds,
+                avg_power_w,
+                session_uuid,
+            ),
         )
         conn.commit()
     finally:
@@ -461,31 +667,55 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
         energy_delivered = max(0.0, end_energy_kwh - (start_energy or 0))
         # Avoid double-counting: also recompute soc_end from energy if not provided
         if soc_end is None and battery_kwh:
-            soc_end = (soc_start or 0) + (energy_delivered / max(0.1, battery_kwh)) * 100
+            soc_end = (soc_start or 0) + (
+                energy_delivered / max(0.1, battery_kwh)
+            ) * 100
             soc_end = min(100.0, soc_end)
         total_cost = energy_delivered * (cost_per_kwh or 0)
-        status = "auto_stopped" if end_reason == "auto" else ("aborted" if end_reason == "fault" else "completed")
+        status = (
+            "auto_stopped"
+            if end_reason == "auto"
+            else ("aborted" if end_reason == "fault" else "completed")
+        )
         conn.execute(
             """UPDATE charge_sessions
                SET end_time = ?, end_energy_kwh = ?, energy_delivered_kwh = ?,
                    duration_seconds = ?, soc_end = ?, total_cost = ?, end_reason = ?, status = ?
                WHERE session_uuid = ?""",
-            (end_dt.isoformat(), end_energy_kwh, energy_delivered, duration, soc_end, total_cost, end_reason, status, session_uuid),
+            (
+                end_dt.isoformat(),
+                end_energy_kwh,
+                energy_delivered,
+                duration,
+                soc_end,
+                total_cost,
+                end_reason,
+                status,
+                session_uuid,
+            ),
         )
         conn.commit()
 
         # ── Save charge stats for future predictions ──
         if duration > 60 and energy_delivered > 0.1:
-            _save_charge_stats({
-                "date": end_dt.strftime("%Y-%m-%d"),
-                "soc_start": soc_start,
-                "soc_end": round(soc_end, 1),
-                "energy_kwh": round(energy_delivered, 3),
-                "duration_min": round(duration / 60, 1),
-                "avg_power_w": round(energy_delivered / (duration / 3600) * 1000, 0) if duration > 0 else 0,
-                "charge_rate_kwh_per_h": round(energy_delivered / (duration / 3600), 2) if duration > 0 else 0,
-                "end_reason": end_reason,
-            })
+            _save_charge_stats(
+                {
+                    "date": end_dt.strftime("%Y-%m-%d"),
+                    "soc_start": soc_start,
+                    "soc_end": round(soc_end, 1),
+                    "energy_kwh": round(energy_delivered, 3),
+                    "duration_min": round(duration / 60, 1),
+                    "avg_power_w": round(energy_delivered / (duration / 3600) * 1000, 0)
+                    if duration > 0
+                    else 0,
+                    "charge_rate_kwh_per_h": round(
+                        energy_delivered / (duration / 3600), 2
+                    )
+                    if duration > 0
+                    else 0,
+                    "end_reason": end_reason,
+                }
+            )
 
         return {
             "session_uuid": session_uuid,
@@ -554,12 +784,23 @@ def list_charge_sessions(limit=50, include_active=False):
             ).fetchall()
         return [
             {
-                "id": r[0], "session_uuid": r[1], "start_time": r[2], "end_time": r[3],
-                "status": r[4], "soc_start": r[5], "soc_end": r[6], "soc_target": r[7],
-                "battery_kwh": r[8], "start_energy_kwh": r[9], "end_energy_kwh": r[10],
-                "energy_delivered_kwh": r[11] or 0, "duration_seconds": r[12] or 0,
-                "avg_power_w": r[13] or 0, "cost_per_kwh": r[14] or 0,
-                "total_cost": r[15] or 0, "end_reason": r[16],
+                "id": r[0],
+                "session_uuid": r[1],
+                "start_time": r[2],
+                "end_time": r[3],
+                "status": r[4],
+                "soc_start": r[5],
+                "soc_end": r[6],
+                "soc_target": r[7],
+                "battery_kwh": r[8],
+                "start_energy_kwh": r[9],
+                "end_energy_kwh": r[10],
+                "energy_delivered_kwh": r[11] or 0,
+                "duration_seconds": r[12] or 0,
+                "avg_power_w": r[13] or 0,
+                "cost_per_kwh": r[14] or 0,
+                "total_cost": r[15] or 0,
+                "end_reason": r[16],
             }
             for r in rows
         ]
@@ -585,11 +826,17 @@ def charge_sessions_summary(days=90, limit_days=None):
         ).fetchone()
         if not row or row[0] == 0:
             return {
-                "session_count": 0, "total_kwh": 0, "total_cost": 0,
-                "total_duration_hours": 0, "avg_kwh_per_session": 0,
-                "avg_cost_per_session": 0, "avg_power_w": 0,
+                "session_count": 0,
+                "total_kwh": 0,
+                "total_cost": 0,
+                "total_duration_hours": 0,
+                "avg_kwh_per_session": 0,
+                "avg_cost_per_session": 0,
+                "avg_power_w": 0,
             }
-        count, total_kwh, total_cost, total_dur, avg_kwh, avg_cost, min_soc, max_soc = row
+        count, total_kwh, total_cost, total_dur, avg_kwh, avg_cost, min_soc, max_soc = (
+            row
+        )
         # avg_power_w = total_kwh * 1000 / total_hours
         total_hours = total_dur / 3600.0
         avg_power = (total_kwh * 1000 / total_hours) if total_hours > 0 else 0
@@ -608,10 +855,11 @@ def charge_sessions_summary(days=90, limit_days=None):
     finally:
         conn.close()
 
+
 # ─── LOCAL-FIRST DB queries ─────────────────────────────────────
 def db_today_stats():
     """Calculate today's consumption using LOCAL data.
-    
+
     Uses POWER × TIME integral (much more accurate than energy counter delta).
     Handles resets automatically since we track power directly.
     """
@@ -619,61 +867,78 @@ def db_today_stats():
     cost = cfg.get("kwh_cost", 0.956)
     today = datetime.now().strftime("%Y-%m-%d")
     month_str = datetime.now().strftime("%Y-%m")
-    
+
     conn = get_db()
     try:
         # Get today's readings
         rows = conn.execute(
             "SELECT timestamp, power, energy FROM readings WHERE device='fase1' AND DATE(timestamp)=? ORDER BY timestamp",
-            (today,)
+            (today,),
         ).fetchall()
-        
+
         if not rows:
-            return {"today_kwh": 0, "today_cost": 0, "month_kwh": 0, "month_cost": 0, "kwh_cost": cost, "source": "local"}
-        
+            return {
+                "today_kwh": 0,
+                "today_cost": 0,
+                "month_kwh": 0,
+                "month_cost": 0,
+                "kwh_cost": cost,
+                "source": "local",
+            }
+
         # Calculate consumption via POWER × TIME (the correct way)
         total_kwh = 0.0
         for i in range(1, len(rows)):
-            t1, p1, e1 = rows[i-1]
+            t1, p1, e1 = rows[i - 1]
             t2, p2, e2 = rows[i]
-            
+
             dt1 = datetime.fromisoformat(t1)
             dt2 = datetime.fromisoformat(t2)
             dt_seconds = (dt2 - dt1).total_seconds()
-            
+
             if 0 < dt_seconds < 120:  # sanity: max 2 min gap
                 # Power is in W, convert to kW and multiply by hours
                 avg_power_w = (p1 + p2) / 2
                 kwh = (avg_power_w / 1000) * (dt_seconds / 3600)
                 total_kwh += kwh
-        
+
         today_kwh = round(total_kwh, 4)
-        
-        # Month: sum of daily snapshots (they store accumulated energy)
+
+        # Month: POWER × TIME integral over all days of current month (robust, no snapshot dependency).
+        # Falls back to daily_snapshots sum only if no readings exist (shouldn't happen post-backfill).
         month_start = datetime.now().strftime("%Y-%m-01")
-        month_row = conn.execute(
-            "SELECT SUM(energy_kwh) FROM daily_snapshots WHERE snapshot_date>=? AND device='fase1'",
-            (month_start,)
-        ).fetchone()
-        month_kwh = max(0, month_row[0] or 0 if month_row else 0)
-        
+        month_rows = conn.execute(
+            "SELECT timestamp, power FROM readings "
+            "WHERE device='fase1' AND DATE(timestamp)>=? AND power IS NOT NULL "
+            "ORDER BY timestamp",
+            (month_start,),
+        ).fetchall()
+        if month_rows and len(month_rows) > 1:
+            month_kwh = round(_kwh_from_power_integral(month_rows), 4)
+        else:
+            month_row = conn.execute(
+                "SELECT SUM(energy_kwh) FROM daily_snapshots WHERE snapshot_date>=? AND device='fase1'",
+                (month_start,),
+            ).fetchone()
+            month_kwh = round(max(0, (month_row[0] or 0) if month_row else 0), 4)
+
         # Get readings count for verification
         count = conn.execute(
             "SELECT COUNT(*) FROM readings WHERE device='fase1' AND DATE(timestamp)=?",
-            (today,)
+            (today,),
         ).fetchone()[0]
-        
+
         # BREAKER: Calculate breaker consumption via stored power readings
         # phase_c now stores breaker_power_w (V × I from DPS 6)
         br_rows = conn.execute(
             "SELECT timestamp, phase_c FROM readings WHERE device='fase1' AND DATE(timestamp)=? ORDER BY timestamp",
-            (today,)
+            (today,),
         ).fetchall()
 
         breaker_kwh = 0.0
         if br_rows:
             for i in range(1, len(br_rows)):
-                t1, pw1 = br_rows[i-1]
+                t1, pw1 = br_rows[i - 1]
                 t2, pw2 = br_rows[i]
 
                 if pw1 is None or pw2 is None:
@@ -687,9 +952,9 @@ def db_today_stats():
                     avg_power_w = (pw1 + pw2) / 2
                     if avg_power_w > 1:
                         breaker_kwh += (avg_power_w / 1000) * (dt_seconds / 3600)
-        
+
         breaker_kwh = round(breaker_kwh, 4)
-        
+
         return {
             "today_kwh": today_kwh,
             "today_cost": round(today_kwh * cost, 2),
@@ -705,113 +970,102 @@ def db_today_stats():
 
 
 def db_daily_history(days=30):
-    """Return daily consumption from LOCAL snapshots + readings."""
+    """Return daily consumption from LOCAL snapshots.
+
+    Snapshots store **consumed kWh per day** (already integrated from power×time),
+    not cumulative readings — so we return them directly without diffing.
+    """
     cfg = load_config()
     cost = cfg.get("kwh_cost", 0.956)
-    
+
     conn = get_db()
     try:
         # Get all snapshots
         snap_rows = conn.execute(
             "SELECT snapshot_date, device, energy_kwh FROM daily_snapshots ORDER BY snapshot_date",
         ).fetchall()
-        
-        f1_snaps = {}
-        br_snaps = {}
+
+        f1_daily = {}
+        br_daily = {}
         for row in snap_rows:
             day, dev, energy = row
             if dev == "fase1":
-                f1_snaps[day] = energy
+                f1_daily[day] = energy
             else:
-                br_snaps[day] = energy
-        
-        # Calculate daily consumption from snapshots
-        f1_daily = {}
-        br_daily = {}
-        
-        sorted_days = sorted(set(f1_snaps.keys()) | set(br_snaps.keys()))
-        for i, day in enumerate(sorted_days):
-            if i == 0:
-                continue
-            prev = sorted_days[i - 1]
-            
-            if prev in f1_snaps and day in f1_snaps:
-                diff = f1_snaps[day] - f1_snaps[prev]
-                if diff > 0:
-                    f1_daily[day] = round(diff, 4)
-            
-            if prev in br_snaps and day in br_snaps:
-                diff = br_snaps[day] - br_snaps[prev]
-                if diff > 0:
-                    br_daily[day] = round(diff, 4)
-        
-        # Get last 30 days, fill in missing with 0
+                br_daily[day] = energy
+
+        # Get last N days, fill missing with 0
         result = []
         today = datetime.now().date()
         for d in range(days - 1, -1, -1):
             day = (today - timedelta(days=d)).strftime("%Y-%m-%d")
-            result.append({
-                "date": day,
-                "consumed_kwh": f1_daily.get(day, 0),
-                "phase1_kwh": f1_daily.get(day, 0),
-                "breaker_kwh": br_daily.get(day, 0),
-                "cost": round(f1_daily.get(day, 0) * cost, 2),
-            })
-        
+            result.append(
+                {
+                    "date": day,
+                    "consumed_kwh": f1_daily.get(day, 0),
+                    "phase1_kwh": f1_daily.get(day, 0),
+                    "breaker_kwh": br_daily.get(day, 0),
+                    "cost": round(f1_daily.get(day, 0) * cost, 2),
+                }
+            )
+
         return result
     finally:
         conn.close()
 
 
 def db_hourly(date=None):
-    """Return hourly consumption from local readings."""
+    """Return hourly consumption from local readings using power×time integration."""
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
 
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT timestamp, energy, power FROM readings WHERE device='fase1' AND DATE(timestamp)=? ORDER BY timestamp",
-            (date,)
+            "SELECT timestamp, power FROM readings WHERE device='fase1' AND DATE(timestamp)=? AND power IS NOT NULL ORDER BY timestamp",
+            (date,),
         ).fetchall()
 
         if not rows:
             return {"date": date, "hours": [], "total_kwh": 0, "source": "local"}
 
-        # Group by hour
-        hourly = defaultdict(lambda: {"count": 0, "energy_sum": 0, "power_sum": 0})
-        for row in rows:
-            ts, energy, power = row
+        # Group timestamps+power by hour for proper integration
+        hourly_data = defaultdict(list)
+        for ts, power in rows:
             hour = datetime.fromisoformat(ts).strftime("%H")
-            hourly[hour]["count"] += 1
-            hourly[hour]["energy_sum"] += energy
-            hourly[hour]["power_sum"] += power
+            hourly_data[hour].append((ts, power or 0))
 
         # Build array of 24 hour entries (frontend expects an array, not a dict)
         hours = []
         total_kwh = 0.0
         for h in range(24):
             hh = f"{h:02d}"
-            if hh in hourly:
-                cnt = hourly[hh]["count"]
-                avg_power = hourly[hh]["power_sum"] / cnt if cnt > 0 else 0
-                kwh = avg_power / 1000
+            if hh in hourly_data and len(hourly_data[hh]) > 1:
+                pts = hourly_data[hh]
+                kwh = round(_kwh_from_power_integral(pts), 4)
+                avg_power = sum(p for _, p in pts) / len(pts)
+                cnt = len(pts)
             else:
-                cnt = 0
-                avg_power = 0
+                cnt = len(hourly_data.get(hh, []))
+                avg_power = hourly_data[hh][0][1] if cnt > 0 else 0
                 kwh = 0
             total_kwh += kwh
-            hours.append({
-                "hour": hh,
-                "kwh": round(kwh, 4),
-                "avg_power_w": round(avg_power, 1),
-                "readings": cnt,
-            })
+            hours.append(
+                {
+                    "hour": hh,
+                    "kwh": round(kwh, 4),
+                    "avg_power_w": round(avg_power, 1),
+                    "readings": cnt,
+                }
+            )
 
+        cfg = load_config()
+        cost = cfg.get("kwh_cost", 0.956)
         return {
             "date": date,
             "hours": hours,
             "total_kwh": round(total_kwh, 4),
+            "total_cost": round(total_kwh * cost, 2),
             "source": "local",
         }
     finally:
@@ -852,6 +1106,7 @@ class ChargingTracker:
         6. If effective SOC >= target but power is still high, we KEEP the breaker ON
            (car is balancing / equalising / not yet full)
     """
+
     STATE_IDLE = "idle"
     STATE_CHARGING = "charging"
     STATE_COMPLETING = "completing"  # target reached, waiting for car to stop pulling
@@ -876,7 +1131,9 @@ class ChargingTracker:
         self.message = ""
         self.session_uuid = None  # DB session reference
 
-    def start(self, start_soc, target_soc, battery_kwh, start_energy_kwh, session_uuid=None):
+    def start(
+        self, start_soc, target_soc, battery_kwh, start_energy_kwh, session_uuid=None
+    ):
         with self.lock:
             self.state = self.STATE_CHARGING
             self.start_time = datetime.now()
@@ -908,7 +1165,9 @@ class ChargingTracker:
             self.energy_samples = []
             self.session_uuid = None
 
-    def update(self, current_energy_kwh, current_power_w, idle_power_w, idle_seconds_needed):
+    def update(
+        self, current_energy_kwh, current_power_w, idle_power_w, idle_seconds_needed
+    ):
         """
         Called every poll cycle while charging. Returns the new state.
 
@@ -926,14 +1185,18 @@ class ChargingTracker:
             self.energy_samples.append((now, current_energy_kwh))
             # Trim old samples (keep last 30 min)
             cutoff = now - timedelta(minutes=30)
-            self.energy_samples = [(t, e) for t, e in self.energy_samples if t >= cutoff]
+            self.energy_samples = [
+                (t, e) for t, e in self.energy_samples if t >= cutoff
+            ]
 
             # Compute energy delta since start
             energy_delta = max(0.0, current_energy_kwh - self.start_energy_kwh)
 
             # Compute effective SOC from energy delivered
             # SOC% = start_soc + (energy_delta_kwh / battery_kwh) * 100
-            self.effective_soc = self.start_soc + (energy_delta / max(0.1, self.battery_kwh)) * 100
+            self.effective_soc = (
+                self.start_soc + (energy_delta / max(0.1, self.battery_kwh)) * 100
+            )
             self.effective_soc = min(100.0, self.effective_soc)
 
             # Maintain rolling avg of last 30s of power samples
@@ -967,7 +1230,11 @@ class ChargingTracker:
                     self.message = f"Meta atingida. Aguardando consumo zerar..."
                 else:
                     # Already completing, check elapsed time
-                    elapsed = (now - self.idle_started_at).total_seconds() if self.idle_started_at else 0
+                    elapsed = (
+                        (now - self.idle_started_at).total_seconds()
+                        if self.idle_started_at
+                        else 0
+                    )
                     if elapsed >= idle_seconds_needed:
                         self.message = f"Pronto para desligar ({int(elapsed)}s idle)"
                     else:
@@ -1010,15 +1277,25 @@ class ChargingTracker:
                 }
 
             elapsed = (datetime.now() - self.start_time).total_seconds()
-            energy_delta = max(0.0, self.last_energy_kwh - self.start_energy_kwh) if self.energy_samples else 0
+            energy_delta = (
+                max(0.0, self.last_energy_kwh - self.start_energy_kwh)
+                if self.energy_samples
+                else 0
+            )
             # Use the last energy sample for accurate delta
             if self.energy_samples:
-                energy_delta = max(0.0, self.energy_samples[-1][1] - self.start_energy_kwh)
+                energy_delta = max(
+                    0.0, self.energy_samples[-1][1] - self.start_energy_kwh
+                )
 
             # Estimate remaining time
             need_soc = max(0, self.target_soc - self.effective_soc)
             need_kwh = (need_soc / 100) * self.battery_kwh
-            avg_power_w = sum(self.power_samples) / max(1, len(self.power_samples)) if self.power_samples else self.last_power_w
+            avg_power_w = (
+                sum(self.power_samples) / max(1, len(self.power_samples))
+                if self.power_samples
+                else self.last_power_w
+            )
             if avg_power_w > 10 and need_kwh > 0:
                 est_min = (need_kwh / (avg_power_w / 1000)) * 60
             else:
@@ -1042,7 +1319,9 @@ class ChargingTracker:
                 "effective_soc": round(self.effective_soc, 1),
                 "start_soc": self.start_soc,
                 "target_soc": self.target_soc,
-                "estimated_remaining_minutes": round(est_min, 1) if est_min is not None else None,
+                "estimated_remaining_minutes": round(est_min, 1)
+                if est_min is not None
+                else None,
                 "target_reached": self.effective_soc >= self.target_soc,
                 "idle_seconds": int(idle_seconds),
                 "current_power_w": self.last_power_w,
@@ -1061,10 +1340,19 @@ charging = ChargingTracker()
 # ─── Poll loop ──────────────────────────────────────────────────
 POLL_INTERVAL = 10  # seconds
 
+
 def poll_loop():
     devs = {}
     prune_counter = 0
-    last_snapshot_day = ""
+    # Recupera último dia com snapshot (persiste entre restarts)
+    _cfg = load_config()
+    last_snapshot_day = _cfg.get("last_snapshot_day", "")
+    print(f"🔄 Polling iniciado. last_snapshot_day={last_snapshot_day or '(nenhum)'}")
+
+    # Backfill inicial: roda 1x por instalação (gate em snapshots_backfilled),
+    # corrigindo placeholders antigos (0.001 / cumulativo) por integrais reais
+    # de power×tempo.
+    _backfill_snapshots_from_readings()
 
     while True:
         try:
@@ -1088,7 +1376,10 @@ def poll_loop():
                 save_reading(f1, br)
 
             # ── Charging tracker update + auto-stop check ──
-            if charging.state in (ChargingTracker.STATE_CHARGING, ChargingTracker.STATE_COMPLETING):
+            if charging.state in (
+                ChargingTracker.STATE_CHARGING,
+                ChargingTracker.STATE_COMPLETING,
+            ):
                 cfg = load_config()
                 # Use breaker's power (V×I from DPS 6) and energy (DPS 1) for charge tracking
                 br_power_w = br.get("power_w", 0) if br else 0
@@ -1099,7 +1390,9 @@ def poll_loop():
                         current_energy_kwh=br_energy_kwh,
                         current_power_w=br_power_w,
                         idle_power_w=cfg.get("car_charge_idle_power_w", 15),
-                        idle_seconds_needed=cfg.get("car_charge_idle_seconds_to_stop", 120),
+                        idle_seconds_needed=cfg.get(
+                            "car_charge_idle_seconds_to_stop", 120
+                        ),
                     )
                     # Persist progress to DB (every ~10s)
                     if charging.session_uuid and charging.start_time:
@@ -1112,13 +1405,18 @@ def poll_loop():
                             avg_power_w=charging.last_power_w,
                         )
                     # Auto-stop when ready and config allows
-                    if (
-                        cfg.get("car_charge_auto_stop", True)
-                        and charging.should_auto_stop(cfg.get("car_charge_idle_seconds_to_stop", 120))
+                    if cfg.get(
+                        "car_charge_auto_stop", True
+                    ) and charging.should_auto_stop(
+                        cfg.get("car_charge_idle_seconds_to_stop", 120)
                     ):
-                        print(f"🔌 Auto-stopping breaker (charge complete, idle confirmed)")
+                        print(
+                            f"🔌 Auto-stopping breaker (charge complete, idle confirmed)"
+                        )
                         try:
-                            d_brk = devs.get("breaker") or connect_device(DEVICES["breaker"])
+                            d_brk = devs.get("breaker") or connect_device(
+                                DEVICES["breaker"]
+                            )
                             d_brk.set_value(BREAKER_SWITCH_DPS, False)
                             time.sleep(1)
                             state.update("breaker", read_breaker(d_brk))
@@ -1126,7 +1424,9 @@ def poll_loop():
                             if charging.session_uuid:
                                 with state.lock:
                                     br_end = state.latest.get("breaker", {})
-                                end_energy_wh = br_end.get("energy_wh", 0) if br_end else 0
+                                end_energy_wh = (
+                                    br_end.get("energy_wh", 0) if br_end else 0
+                                )
                                 end_energy = end_energy_wh / 100 if end_energy_wh else 0
                                 finalize_charge_session(
                                     charging.session_uuid,
@@ -1140,24 +1440,64 @@ def poll_loop():
                         except Exception as e:
                             print(f"Auto-stop error: {e}")
 
-            # Daily snapshot at midnight
+            # Daily snapshot: detecta virada de dia e fecha o dia que acabou
             today = datetime.now().strftime("%Y-%m-%d")
-            if today != last_snapshot_day and datetime.now().hour == 0:
+            if last_snapshot_day and today != last_snapshot_day:
+                # O dia virou — fecha o dia que estava em curso
+                closing_day = last_snapshot_day
                 conn = get_db()
                 try:
-                    for device, energy in [("fase1", f1.get("energy", 0)), ("breaker", br.get("energy_kwh", 0))]:
-                        if energy > 0:
-                            conn.execute(
-                                """INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, created_at)
-                                   VALUES (?, ?, ?, ?)
-                                   ON CONFLICT(snapshot_date, device) DO UPDATE SET energy_kwh = excluded.energy_kwh""",
-                                (today, device, energy, datetime.now().isoformat()),
-                            )
+                    f1_rows = conn.execute(
+                        "SELECT timestamp, power FROM readings "
+                        "WHERE device='fase1' AND DATE(timestamp)=? AND power IS NOT NULL "
+                        "ORDER BY timestamp",
+                        (closing_day,),
+                    ).fetchall()
+                    br_rows = conn.execute(
+                        "SELECT timestamp, phase_c FROM readings "
+                        "WHERE device='fase1' AND DATE(timestamp)=? AND phase_c IS NOT NULL "
+                        "ORDER BY timestamp",
+                        (closing_day,),
+                    ).fetchall()
+                    f1_kwh = (
+                        round(_kwh_from_power_integral(f1_rows), 4) if f1_rows else 0
+                    )
+                    br_kwh = (
+                        round(_kwh_from_power_integral(br_rows), 4) if br_rows else 0
+                    )
+                    if f1_kwh > 0:
+                        conn.execute(
+                            """INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, created_at)
+                               VALUES (?, 'fase1', ?, ?)
+                               ON CONFLICT(snapshot_date, device) DO UPDATE SET energy_kwh = excluded.energy_kwh""",
+                            (closing_day, f1_kwh, datetime.now().isoformat()),
+                        )
+                    if br_kwh > 0:
+                        conn.execute(
+                            """INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, created_at)
+                               VALUES (?, 'breaker', ?, ?)
+                               ON CONFLICT(snapshot_date, device) DO UPDATE SET energy_kwh = excluded.energy_kwh""",
+                            (closing_day, br_kwh, datetime.now().isoformat()),
+                        )
                     conn.commit()
-                    print(f"📸 Snapshot saved for {today}")
-                    last_snapshot_day = today
+                    print(
+                        f"📸 Snapshot fechado para {closing_day}: fase1={f1_kwh}kWh breaker={br_kwh}kWh"
+                    )
+                except Exception as e:
+                    print(f"⚠️ Erro ao fechar snapshot de {closing_day}: {e}")
                 finally:
                     conn.close()
+                # Persiste o novo "último dia fechado" na config
+                _cfg2 = load_config()
+                _cfg2["last_snapshot_day"] = today
+                save_config(_cfg2)
+                last_snapshot_day = today
+            elif not last_snapshot_day:
+                # Primeira execução: registra o dia atual sem fechar nada
+                _cfg3 = load_config()
+                _cfg3["last_snapshot_day"] = today
+                save_config(_cfg3)
+                last_snapshot_day = today
 
             prune_counter += 1
             if prune_counter >= 600:
@@ -1173,14 +1513,21 @@ def poll_loop():
 # ─── FastAPI app ────────────────────────────────────────────────
 app = FastAPI()
 
+
 @app.get("/api/status")
 def api_status():
     with state.lock:
-        return {"timestamp": datetime.now().isoformat(), "devices": state.latest, "config": load_config()}
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "devices": state.latest,
+            "config": load_config(),
+        }
+
 
 @app.get("/api/today")
 def api_today():
     return db_today_stats()
+
 
 @app.get("/api/daily-history")
 def api_daily_history(days: int = 30):
@@ -1216,11 +1563,13 @@ def db_monthly_stats(year: int, month: int):
             # Tuya energy counter is in Wh, convert to kWh
             delta_kwh = delta / 1000.0
             total_kwh += delta_kwh
-            daily.append({
-                "day": day,
-                "kwh": round(delta_kwh, 4),
-                "cost": round(delta_kwh * cost, 2),
-            })
+            daily.append(
+                {
+                    "day": day,
+                    "kwh": round(delta_kwh, 4),
+                    "cost": round(delta_kwh * cost, 2),
+                }
+            )
         return {
             "year": year,
             "month": month,
@@ -1260,7 +1609,11 @@ def api_clear_db(before_days: int = 30):
     # Guard: negative or zero values would target the future (delete everything).
     # Clamp to a minimum of 1 day.
     if before_days < 1:
-        return {"success": False, "error": "before_days must be >= 1", "received": before_days}
+        return {
+            "success": False,
+            "error": "before_days must be >= 1",
+            "received": before_days,
+        }
     try:
         cutoff = (datetime.now() - timedelta(days=before_days)).isoformat()
         conn = get_db()
@@ -1279,6 +1632,7 @@ def api_clear_db(before_days: int = 30):
 def api_hourly(date: str = None):
     return db_hourly(date)
 
+
 @app.post("/api/breaker/on")
 def api_breaker_on():
     try:
@@ -1290,9 +1644,14 @@ def api_breaker_on():
         state.update("breaker", read_breaker(d))
         with state.lock:
             actual = state.latest.get("breaker", {}).get("switch", False)
-        return {"success": actual, "state": "ON" if actual else "FAILED", "breaker_switch": actual}
+        return {
+            "success": actual,
+            "state": "ON" if actual else "FAILED",
+            "breaker_switch": actual,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
 
 @app.post("/api/breaker/off")
 def api_breaker_off():
@@ -1303,9 +1662,14 @@ def api_breaker_off():
         state.update("breaker", read_breaker(d))
         with state.lock:
             actual = state.latest.get("breaker", {}).get("switch", False)
-        return {"success": not actual, "state": "OFF" if not actual else "FAILED", "breaker_switch": actual}
+        return {
+            "success": not actual,
+            "state": "OFF" if not actual else "FAILED",
+            "breaker_switch": actual,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
 
 # ─── Car charging endpoints ─────────────────────────────────────
 @app.post("/api/car/soc")
@@ -1316,6 +1680,7 @@ def api_car_soc(soc: int = 0):
     save_config(cfg)
     return {"success": True, "car_current_soc": cfg["car_current_soc"]}
 
+
 @app.post("/api/car/target")
 def api_car_target(target: int = 80):
     """Update target SOC."""
@@ -1323,6 +1688,7 @@ def api_car_target(target: int = 80):
     cfg["car_target_soc"] = max(0, min(100, target))
     save_config(cfg)
     return {"success": True, "car_target_soc": cfg["car_target_soc"]}
+
 
 @app.post("/api/car/start-charge")
 def api_car_start_charge():
@@ -1387,12 +1753,15 @@ def api_car_start_charge():
         cfg["car_charge_start_soc"] = cfg.get("car_current_soc", 50)
         save_config(cfg)
         return {
-            "success": True, "state": "charging", "breaker_switch": True,
+            "success": True,
+            "state": "charging",
+            "breaker_switch": True,
             "session_uuid": session["session_uuid"],
             "charge": charging.get_status(),
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
 
 @app.post("/api/car/stop-charge")
 def api_car_stop_charge():
@@ -1423,17 +1792,21 @@ def api_car_stop_charge():
         cfg["car_charge_start_time"] = None
         save_config(cfg)
         return {
-            "success": True, "state": "stopped", "breaker_switch": False,
+            "success": True,
+            "state": "stopped",
+            "breaker_switch": False,
             "charge": charging.get_status(),
             "finalized_session": result,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
 @app.get("/api/charge/state")
 def api_charge_state():
     """Detailed charging session state from the tracker."""
     return charging.get_status()
+
 
 @app.get("/api/charge/sessions")
 def api_charge_sessions(limit: int = 50, include_active: bool = False):
@@ -1443,10 +1816,12 @@ def api_charge_sessions(limit: int = 50, include_active: bool = False):
         "active": get_active_charge_session(),
     }
 
+
 @app.get("/api/charge/summary")
 def api_charge_summary(days: int = 90):
     """Summary of charge sessions over the period."""
     return charge_sessions_summary(days=days)
+
 
 @app.get("/api/car/status")
 def api_car_status():
@@ -1476,6 +1851,7 @@ def api_car_status():
         "auto_stop_enabled": cfg.get("car_charge_auto_stop", True),
     }
 
+
 # ─── Prepayment (DPS 11) endpoints ──────────────────────────────
 @app.post("/api/breaker/prepay/on")
 def api_breaker_prepay_on():
@@ -1491,6 +1867,7 @@ def api_breaker_prepay_on():
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
 @app.post("/api/breaker/prepay/off")
 def api_breaker_prepay_off():
     """Disable prepayment mode (DPS 11 = False)."""
@@ -1505,9 +1882,11 @@ def api_breaker_prepay_off():
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
 @app.get("/api/config")
 def api_config():
     return load_config()
+
 
 @app.post("/api/config")
 def api_config_update(cfg: dict = None):
@@ -1515,12 +1894,18 @@ def api_config_update(cfg: dict = None):
         return {"error": "No config provided"}
     # Whitelist of allowed config keys (prevents arbitrary key injection)
     ALLOWED_CONFIG_KEYS = {
-        "kwh_cost", "kwh_currency",
-        "car_battery_kwh", "car_charge_power_w",
-        "car_target_soc", "car_current_soc",
-        "car_charging", "car_charge_start_kwh",
-        "car_charge_start_time", "car_charge_start_soc",
-        "car_charge_idle_seconds_to_stop", "car_charge_idle_power_w",
+        "kwh_cost",
+        "kwh_currency",
+        "car_battery_kwh",
+        "car_charge_power_w",
+        "car_target_soc",
+        "car_current_soc",
+        "car_charging",
+        "car_charge_start_kwh",
+        "car_charge_start_time",
+        "car_charge_start_soc",
+        "car_charge_idle_seconds_to_stop",
+        "car_charge_idle_power_w",
         "car_charge_auto_stop",
         "cloud_enabled",
     }
@@ -1534,16 +1919,18 @@ def api_config_update(cfg: dict = None):
         result["rejected"] = sorted(rejected)
     return result
 
+
 @app.get("/api/cloud-logs")
 def api_cloud_logs(device: str = "fase1", days: int = 2):
     """Fetch cloud logs on-demand (user-triggered). Requires cloud_enabled=True"""
     cfg = load_config()
     if not cfg.get("cloud_enabled", False):
         return {"error": "Cloud disabled", "cloud_enabled": False}
-    
+
     device_id = DEVICES.get(device, {}).get("id", device)
     logs = get_cloud_logs(device_id, days=days, use_cache=False)
     return {"count": len(logs), "logs": logs[:100]}
+
 
 @app.post("/api/cloud/enable")
 def api_cloud_enable():
@@ -1553,6 +1940,7 @@ def api_cloud_enable():
     save_config(cfg)
     return {"cloud_enabled": True, "message": "Cloud enabled. Logs will be fetched."}
 
+
 @app.post("/api/cloud/disable")
 def api_cloud_disable():
     """Disable cloud fetching (user decision)."""
@@ -1561,11 +1949,15 @@ def api_cloud_disable():
     save_config(cfg)
     return {"cloud_enabled": False, "message": "Cloud disabled. Using local data only."}
 
+
 @app.get("/api/cloud/status")
 def api_cloud_status():
     """Check cloud status."""
     cfg = load_config()
-    return {"cloud_enabled": cfg.get("cloud_enabled", False), "cloud_cached": len(_cloud_cache)}
+    return {
+        "cloud_enabled": cfg.get("cloud_enabled", False),
+        "cloud_cached": len(_cloud_cache),
+    }
 
 
 @app.get("/")
@@ -1573,7 +1965,11 @@ def root():
     html_path = BASE_DIR / "src" / "index.html"
     if html_path.exists():
         return HTMLResponse(html_path.read_text())
-    return {"status": "Tuya Energy Dashboard", "version": "2.0-local-first", "message": "HTML page not found"}
+    return {
+        "status": "Tuya Energy Dashboard",
+        "version": "2.0-local-first",
+        "message": "HTML page not found",
+    }
 
 
 if __name__ == "__main__":
@@ -1610,7 +2006,9 @@ if __name__ == "__main__":
             # Override start_time to the DB session's real start
             charging.start_time = datetime.fromisoformat(_start_ts)
             elapsed_min = (datetime.now() - charging.start_time).total_seconds() / 60
-            print(f"🔄 Sessão recuperada do DB: {_soc_start}% → {_soc_target}% (já decorrido: {elapsed_min:.0f} min)")
+            print(
+                f"🔄 Sessão recuperada do DB: {_soc_start}% → {_soc_target}% (já decorrido: {elapsed_min:.0f} min)"
+            )
         elif _cfg.get("car_charge_start_time"):
             # Fallback: config has start_time but no DB session — start fresh
             _start_wh = 0
@@ -1627,7 +2025,9 @@ if __name__ == "__main__":
                 start_energy_kwh=_start_wh / 100 if _start_wh else 0,
             )
             charging.start_time = datetime.fromisoformat(_cfg["car_charge_start_time"])
-            print(f"🔄 Sessão recuperada da config: SOC {_cfg.get('car_current_soc')}% → {_cfg.get('car_target_soc')}%")
+            print(
+                f"🔄 Sessão recuperada da config: SOC {_cfg.get('car_current_soc')}% → {_cfg.get('car_target_soc')}%"
+            )
 
     threading.Thread(target=poll_loop, daemon=True).start()
     # Bind address:

@@ -385,6 +385,25 @@
             </div>
         </div>
 
+        <!-- SOC Atual (input editável) -->
+        <div class="ev-current-soc-section" style="background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.04);border-radius:12px;padding:1rem;margin-bottom:1rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
+            <div style="flex:1;min-width:200px">
+                <div style="font-size:.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:.3rem">🔋 SOC Atual do Carro</div>
+                <div style="display:flex;align-items:center;gap:.6rem">
+                    <input type="number" id="socCurrent" min="0" max="100" step="1" value="50"
+                        oninput="onCurrentSocInput(this.value)"
+                        onchange="updateCurrentSoc()"
+                        style="width:90px;padding:.5rem .7rem;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:1.2rem;font-weight:700;font-variant-numeric:tabular-nums;text-align:center">
+                    <span style="font-size:1.1rem;color:var(--dim)">%</span>
+                    <span id="socCurrentHint" style="font-size:.75rem;color:var(--dim);margin-left:.3rem"></span>
+                </div>
+            </div>
+            <div style="flex:0 0 auto;text-align:right">
+                <div style="font-size:.65rem;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:.3rem">⚡ Estimativa até a meta</div>
+                <div id="socCurrentEta" style="font-size:1.4rem;font-weight:800;color:var(--accent);font-variant-numeric:tabular-nums">—</div>
+            </div>
+        </div>
+
         <!-- SOC Target selector -->
         <div class="ev-target-section">
             <div class="ev-target-header">
@@ -790,6 +809,13 @@ function updateUI(data) {
     const evTargetDisplay = document.getElementById('evTargetDisplay');
     if (evTargetDisplay) evTargetDisplay.textContent = target + '%';
 
+    // SOC atual input sync
+    const socCurrentInput = document.getElementById('socCurrent');
+    if (socCurrentInput && document.activeElement !== socCurrentInput) {
+        socCurrentInput.value = manualSoc;
+    }
+    onCurrentSocInput(manualSoc);
+
     // Quick targets
     document.querySelectorAll('.ev-qt').forEach(b => {
         const v = parseInt(b.textContent);
@@ -922,8 +948,25 @@ function updateTimer(isCharging, powerW, targetPower, targetSoc, currentSoc, bat
     const disp = document.getElementById('timerDisplay');
     if (!timer || !disp) return;
 
+    if (currentSoc >= targetSoc) {
+        // Já atingiu a meta
+        timer.style.display = 'block';
+        timer.classList.add('done');
+        disp.textContent = '✅ COMPLETO';
+        return;
+    }
+
     if (!isCharging || powerW < 10) {
-        timer.style.display = 'none';
+        // Não está carregando: mostra projeção baseada em config
+        timer.style.display = 'block';
+        timer.classList.remove('done');
+        const needKwh = Math.max(0, (targetSoc - currentSoc) / 100 * batteryKwh);
+        const hours = needKwh / Math.max(0.1, targetPower / 1000);
+        const minsLeft = Math.max(0, Math.round(hours * 60));
+        const h = Math.floor(minsLeft / 60);
+        const m = minsLeft % 60;
+        if (h > 0) disp.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
+        else disp.textContent = `${m}min`;
         return;
     }
 
@@ -991,9 +1034,53 @@ async function updateTarget() {
     fetchStatus();
 }
 
+async function updateCurrentSoc() {
+    const v = parseInt(document.getElementById('socCurrent')?.value);
+    if (isNaN(v)) return;
+    const clamped = Math.max(0, Math.min(100, v));
+    if (clamped !== v) document.getElementById('socCurrent').value = clamped;
+    await fetch('/api/car/soc?soc=' + clamped, {method:'POST'});
+    fetchStatus();
+}
+
+function onCurrentSocInput(val) {
+    // Atualiza a estimativa em tempo real (sem chamar API até o onchange)
+    const soc = Math.max(0, Math.min(100, parseInt(val) || 0));
+    const target = parseInt(document.getElementById('evSlider')?.value) || 80;
+    const batt = parseFloat(document.getElementById('cibBattery')?.textContent) || 12.9;
+    const power = parseFloat(document.getElementById('cibPower')?.textContent) || 2400;
+    const etaEl = document.getElementById('socCurrentEta');
+    if (!etaEl) return;
+    if (soc >= target) {
+        etaEl.textContent = '✅ pronto';
+        etaEl.style.color = 'var(--ok)';
+    } else {
+        const needKwh = Math.max(0, (target - soc) / 100 * batt);
+        const hours = needKwh / Math.max(0.1, power / 1000);
+        const mins = Math.round(hours * 60);
+        if (mins < 60) {
+            etaEl.textContent = `${mins} min`;
+        } else {
+            const h = Math.floor(mins / 60);
+            const m = mins % 60;
+            etaEl.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
+        }
+        etaEl.style.color = 'var(--accent)';
+    }
+}
+
 function setTarget(v) {
-    document.getElementById('socTarget').value = v;
-    updateTarget();
+    const slider = document.getElementById('evSlider');
+    if (slider) slider.value = v;
+    document.getElementById('evTargetDisplay').textContent = v + '%';
+    fetch('/api/car/target?target=' + v, {method:'POST'}).then(() => fetchStatus());
+}
+
+async function updateTarget() {
+    const v = parseInt(document.getElementById('evSlider')?.value);
+    if (isNaN(v)) return;
+    await fetch('/api/car/target?target=' + v, {method:'POST'});
+    fetchStatus();
 }
 
 async function startCharge() {
@@ -1119,10 +1206,11 @@ async function loadHourly() {
             cHourly.update();
         }
         const total = d.total_kwh || 0;
-        const avgW = d.hours?.length ? d.hours.reduce((s,h) => s + h.kwh, 0) / d.hours.filter(h => h.kwh > 0).length * 1000 || 0 : 0;
+        const nonZeroHours = d.hours?.filter(h => h.kwh > 0) || [];
+        const avgW = nonZeroHours.length > 0 ? nonZeroHours.reduce((s,h) => s + h.avg_power_w, 0) / nonZeroHours.length : 0;
         document.getElementById('hlyTotal').textContent = total.toFixed(3);
-        document.getElementById('hlyCost').textContent = fmtR(d.total_cost || 0);
-        document.getElementById('hlyAvg').textContent = (d.source === 'cloud' ? '—' : avgW.toFixed(0) + 'W');
+        document.getElementById('hlyCost').textContent = fmtR(d.total_cost || total * kwhCost);
+        document.getElementById('hlyAvg').textContent = avgW.toFixed(0) + 'W';
     } catch(e) { console.error('Hourly error:', e); }
 }
 

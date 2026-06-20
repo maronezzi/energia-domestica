@@ -39,42 +39,50 @@ if DEVICES_FILE.exists():
     ]
 else:
     print(f"⚠️  {DEVICES_FILE} not found.")
-    print(f"   Copy src/devices.example.json to data/devices.json and fill in credentials.")
+    print(
+        f"   Copy src/devices.example.json to data/devices.json and fill in credentials."
+    )
     DEVICES = []
 
 CSV_FILE = "tuya_energy_log.csv"
 INTERVAL = 5  # segundos
+
 
 def init_csv():
     exists = os.path.exists(CSV_FILE)
     with open(CSV_FILE, "a", newline="") as f:
         w = csv.writer(f)
         if not exists:
-            w.writerow([
-                "timestamp",
-                "device",
-                # Medidor Fase 1
-                "fase1_voltage_v",
-                "fase1_current_a",
-                "fase1_power_w",
-                "fase1_energy_kwh",
-                # Breaker
-                "breaker_energy_kwh",
-                "breaker_switch",
-                "breaker_phase_a",
-                "breaker_phase_b",
-                "breaker_phase_c",
-            ])
+            w.writerow(
+                [
+                    "timestamp",
+                    "device",
+                    # Medidor Fase 1
+                    "fase1_voltage_v",
+                    "fase1_current_a",
+                    "fase1_power_w",
+                    "fase1_energy_kwh",
+                    # Breaker
+                    "breaker_energy_kwh",
+                    "breaker_switch",
+                    "breaker_phase_a",
+                    "breaker_phase_b",
+                    "breaker_phase_c",
+                ]
+            )
     print(f"📝 Log: {CSV_FILE}")
+
 
 def read_medidor_fase1(d):
     dps = d.status().get("dps", {})
+    v_raw = dps.get("20", 0)
     return {
-        "voltage_v": round(dps.get("20", 0) / 10, 1) if dps.get("20", 0) > 100 else dps.get("20", 0),
-        "current_a": dps.get("18", 0),
-        "power_w": dps.get("19", 0),
-        "energy_kwh": dps.get("17", 0),
+        "voltage_v": round(v_raw / 10, 1) if v_raw > 100 else v_raw,
+        "current_a": round(dps.get("18", 0) / 1000, 3),
+        "power_w": round(dps.get("19", 0) / 10, 1),
+        "energy_kwh": round(dps.get("17", 0) / 1000, 4),
     }
+
 
 def read_breaker(d):
     dps = d.status().get("dps", {})
@@ -85,6 +93,7 @@ def read_breaker(d):
         "phase_b": dps.get("102", 0),
         "phase_c": dps.get("103", 0),
     }
+
 
 def main():
     print("=" * 65)
@@ -105,7 +114,7 @@ def main():
                 version=cfg["version"],
             )
             test = d.status()
-            print(f"     ✅ Conectado! DPS: {list(test.get('dps',{}).keys())}")
+            print(f"     ✅ Conectado! DPS: {list(test.get('dps', {}).keys())}")
             devs.append((cfg["name"], d))
         except Exception as e:
             print(f"     ❌ Erro: {e}")
@@ -140,17 +149,27 @@ def main():
                 if "Fase 1" in name:
                     m = read_medidor_fase1(d)
                     v = f"{m['voltage_v']:.1f}"
-                    a = f"{m['current_a']:.1f}" if m['current_a'] else "0"
+                    a = f"{m['current_a']:.1f}" if m["current_a"] else "0"
                     w = f"{m['power_w']}"
                     k = f"{m['energy_kwh']}"
                     line_parts.extend([v, a, w, k])
-                    row.extend([m["voltage_v"], m["current_a"], m["power_w"], m["energy_kwh"]])
+                    row.extend(
+                        [m["voltage_v"], m["current_a"], m["power_w"], m["energy_kwh"]]
+                    )
                 elif "Breaker" in name:
                     m = read_breaker(d)
                     k = f"{m['energy_kwh']}"
                     sw = "ON" if m["switch"] else "OFF"
                     line_parts.extend([k, sw])
-                    row.extend([m["energy_kwh"], m["switch"], m["phase_a"], m["phase_b"], m["phase_c"]])
+                    row.extend(
+                        [
+                            m["energy_kwh"],
+                            m["switch"],
+                            m["phase_a"],
+                            m["phase_b"],
+                            m["phase_c"],
+                        ]
+                    )
             except Exception as e:
                 line_parts.extend(["ERR"] * (5 if "Fase 1" in name else 2))
                 row.extend([""] * (4 if "Fase 1" in name else 5))
@@ -162,6 +181,7 @@ def main():
             csv.writer(f).writerow(row)
 
         time.sleep(INTERVAL)
+
 
 if __name__ == "__main__":
     try:
