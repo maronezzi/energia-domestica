@@ -488,9 +488,9 @@ def _backfill_snapshots_from_readings():
             "SELECT DATE(timestamp) AS day, timestamp, power FROM readings "
             "WHERE device='fase1' AND power IS NOT NULL ORDER BY timestamp"
         ).fetchall()
-        br_rows = conn.execute(
-            "SELECT DATE(timestamp) AS day, timestamp, phase_c FROM readings "
-            "WHERE device='fase1' AND phase_c IS NOT NULL ORDER BY timestamp"
+        br_counter_rows = conn.execute(
+            "SELECT DATE(timestamp) AS day, breaker_energy FROM readings "
+            "WHERE device='fase1' AND breaker_energy IS NOT NULL ORDER BY timestamp"
         ).fetchall()
 
         # Group by day
@@ -499,11 +499,12 @@ def _backfill_snapshots_from_readings():
         f1_by_day = defaultdict(list)
         for day, ts, p in f1_rows:
             f1_by_day[day].append((ts, p or 0))
-        br_by_day = defaultdict(list)
-        for day, ts, p in br_rows:
-            br_by_day[day].append((ts, p or 0))
+        br_counter_by_day = defaultdict(list)
+        for day, val in br_counter_rows:
+            if val is not None:
+                br_counter_by_day[day].append(val)
 
-        days = sorted(set(f1_by_day.keys()) | set(br_by_day.keys()))
+        days = sorted(set(f1_by_day.keys()) | set(br_counter_by_day.keys()))
         # Include today too (in-progress day). The poll_loop will close it properly at next-day rollover
         # and overwrite if needed (but we want a real number for the current day's chart bar).
         n_f1, n_br = 0, 0
@@ -513,9 +514,10 @@ def _backfill_snapshots_from_readings():
                 if f1_by_day[day]
                 else 0
             )
+            vals = br_counter_by_day.get(day, [])
             br_kwh = (
-                round(_kwh_from_power_integral(br_by_day[day]), 4)
-                if br_by_day.get(day)
+                round((max(vals) - min(vals)) / 100, 4)
+                if vals and len(vals) >= 2
                 else 0
             )
 
@@ -1481,17 +1483,18 @@ def poll_loop():
                         "ORDER BY timestamp",
                         (closing_day,),
                     ).fetchall()
-                    br_rows = conn.execute(
-                        "SELECT timestamp, phase_c FROM readings "
-                        "WHERE device='fase1' AND DATE(timestamp)=? AND phase_c IS NOT NULL "
-                        "ORDER BY timestamp",
+                    br_counter = conn.execute(
+                        "SELECT MAX(breaker_energy), MIN(breaker_energy) FROM readings "
+                        "WHERE device='fase1' AND DATE(timestamp)=? AND breaker_energy IS NOT NULL",
                         (closing_day,),
-                    ).fetchall()
+                    ).fetchone()
                     f1_kwh = (
                         round(_kwh_from_power_integral(f1_rows), 4) if f1_rows else 0
                     )
                     br_kwh = (
-                        round(_kwh_from_power_integral(br_rows), 4) if br_rows else 0
+                        round((br_counter[0] - br_counter[1]) / 100, 4)
+                        if br_counter and br_counter[0] is not None and br_counter[1] is not None
+                        else 0
                     )
                     if f1_kwh > 0:
                         conn.execute(
