@@ -76,6 +76,7 @@ DEFAULT_CONFIG = {
     "car_charge_start_soc": None,  # SOC value at charge start
     "car_charge_idle_seconds_to_stop": 120,  # Wait this long with low power before auto-stop
     "car_charge_idle_power_w": 15,  # Power threshold to consider "idle/done"
+    "car_charge_start_power_w": 500,  # Power threshold to auto-detect charging started
     "car_charge_auto_stop": True,  # Auto-stop when done
     "cloud_enabled": False,  # Cloud OFF by default - user decides
 }
@@ -1234,10 +1235,15 @@ class ChargingTracker:
         """
         Called every poll cycle while charging. Returns the new state.
 
-        Note: current_power_w comes from the main meter (total house consumption).
-        When the car is charging, total power is ~3000W. When it stops, it drops
-        to ~500W (house baseline). Idle detection uses a relative threshold:
-        if power drops below 30% of the charging peak, the car stopped accepting.
+        Idle detection is POWER-BASED (not gated on target SOC): the breaker
+        measures only the car circuit, so when the car stops accepting charge the
+        breaker power drops to ~idle (<= idle_power_w). This correctly handles
+        BOTH app-started sessions AND sessions where the breaker was flipped on
+        manually — in the latter case our energy-based SOC estimate may never
+        reach the configured target even though the car is physically full, so a
+        target-gated end check would never fire. The "balancing" case is
+        preserved: while the car still draws real power (even above target) it
+        stays CHARGING and the breaker is kept ON.
         """
         with self.lock:
             if self.state not in (self.STATE_CHARGING, self.STATE_COMPLETING):
@@ -1271,26 +1277,18 @@ class ChargingTracker:
             if current_power_w > self.peak_power_w:
                 self.peak_power_w = current_power_w
 
-            # Decision logic
+            # Decision logic (power-based — see method docstring)
             target_reached = self.effective_soc >= self.target_soc
+            power_idle = current_power_w <= idle_power_w
 
-            if not target_reached:
-                # Normal charging phase
-                self.state = self.STATE_CHARGING
-                self.idle_started_at = None
-                self.message = "Carregando"
-                return self.state
-
-            # Target reached. Check if power dropped to idle.
-            # The breaker measures only the car circuit, so absolute threshold works.
-            current_power_check = current_power_w
-            if current_power_check <= idle_power_w:
-                # Power is low - the car probably finished accepting charge
+            if power_idle:
+                # Car stopped accepting charge (finished, or top-off taper).
+                # Begin / continue the completion-confirmation window.
                 if self.state == self.STATE_CHARGING:
                     # Transition: CHARGING → COMPLETING
                     self.state = self.STATE_COMPLETING
                     self.idle_started_at = now
-                    self.message = f"Meta atingida. Aguardando consumo zerar..."
+                    self.message = "Carro parou de consumir. Aguardando confirmação..."
                 else:
                     # Already completing, check elapsed time
                     elapsed = (
@@ -1303,13 +1301,16 @@ class ChargingTracker:
                     else:
                         self.message = f"Confirmando carga completa... {int(idle_seconds_needed - elapsed)}s"
             else:
-                # Target reached but car still pulling power (balancing/equalising)
-                # KEEP BREAKER ON - don't shut off yet
+                # Car is still drawing real power — charging or cell-balancing.
+                # KEEP BREAKER ON.
                 if self.state == self.STATE_COMPLETING:
+                    # Resumed drawing power (e.g. balancing kicked in) — back to charging
                     self.state = self.STATE_CHARGING
-                    self.message = "Carro ainda consumindo - mantendo ligado"
+                    self.message = "Carro voltou a consumir - mantendo ligado"
+                elif target_reached:
+                    self.message = "Meta atingida, carro ainda consumindo (balanceando)"
                 else:
-                    self.message = "Meta atingida, carro ainda consumindo"
+                    self.message = "Carregando"
                 self.idle_started_at = None
 
             return self.state
@@ -1412,6 +1413,11 @@ def poll_loop():
     last_snapshot_day = _cfg.get("last_snapshot_day", "")
     print(f"🔄 Polling iniciado. last_snapshot_day={last_snapshot_day or '(nenhum)'}")
 
+    # Previous breaker energy counter (kWh) + timestamp, used to estimate power
+    # from the DPS 1 cumulative delta when DPS 6 (V×I) reads 0 during charging.
+    prev_br_counter_kwh = None
+    prev_br_counter_ts = None
+
     # Backfill inicial: roda 1x por instalação (gate em snapshots_backfilled),
     # corrigindo placeholders antigos (0.001 / cumulativo) por integrais reais
     # de power×tempo.
@@ -1438,19 +1444,91 @@ def poll_loop():
             if f1:
                 save_reading(f1, br)
 
+            # ── AUTO-DETECT charging: breaker ON with power or energy changing ──
+            if (
+                br
+                and br.get("switch", False)
+                and charging.state == ChargingTracker.STATE_IDLE
+                and (
+                    br.get("power_w", 0) > 500
+                    or (
+                        br.get("energy_wh", 0) > 0
+                        and prev_br_counter_kwh is not None
+                        and prev_br_counter_kwh > 0
+                        and br.get("energy_wh", 0) != prev_br_counter_kwh
+                    )
+                )
+            ):
+                cfg_detect = load_config()
+                session = create_charge_session(
+                    soc_start=cfg_detect.get("car_current_soc", 50),
+                    soc_target=cfg_detect.get("car_target_soc", 80),
+                    battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
+                    start_energy_kwh=br.get("energy_wh", 0),
+                    cost_per_kwh=cfg_detect.get("kwh_cost", 0.956),
+                )
+                charging.start(
+                    start_soc=cfg_detect.get("car_current_soc", 50),
+                    target_soc=cfg_detect.get("car_target_soc", 80),
+                    battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
+                    start_energy_kwh=br.get("energy_wh", 0),
+                    session_uuid=session["session_uuid"],
+                )
+                print("⚡ Auto-detected charging: breaker ON with power, starting session")
+
+            # ── Breaker power, with energy-counter fallback ──
+            # DPS 6 (V×I) sometimes returns 0 during active charging. When it
+            # does, estimate power from the DPS 1 cumulative counter delta so
+            # auto-detect and idle detection keep working.
+            # NOTE: the counter field is in kWh (see read_breaker); the legacy
+            # "energy_wh" key name is kept for backward compatibility.
+            br_switch_on = bool(br.get("switch")) if br else False
+            br_power_w = br.get("power_w", 0) if br else 0
+            br_counter_kwh = br.get("energy_wh", 0) if br else 0  # kWh (legacy name)
+            if (
+                br_power_w <= 0
+                and br_counter_kwh > 0
+                and prev_br_counter_kwh is not None
+                and prev_br_counter_kwh > 0
+            ):
+                dt_s = (datetime.now() - prev_br_counter_ts).total_seconds()
+                delta_kwh = br_counter_kwh - prev_br_counter_kwh
+                if 0 < dt_s < 120 and delta_kwh > 0:
+                    # kWh over seconds → watts
+                    br_power_w = delta_kwh * 3_600_000.0 / dt_s
+            if br_counter_kwh > 0:
+                prev_br_counter_kwh = br_counter_kwh
+                prev_br_counter_ts = datetime.now()
+
+            cfg = load_config()
+
             # ── Charging tracker update + auto-stop check ──
             if charging.state in (
                 ChargingTracker.STATE_CHARGING,
                 ChargingTracker.STATE_COMPLETING,
             ):
-                cfg = load_config()
-                # Use breaker's power (V×I from DPS 6) and energy (DPS 1) for charge tracking
-                br_power_w = br.get("power_w", 0) if br else 0
-                br_energy_wh = br.get("energy_wh", 0) if br else 0
-                br_energy_kwh = br_energy_wh if br_energy_wh else 0
-                if br:
+                if br is not None and not br_switch_on:
+                    # Breaker was turned OFF externally (physical switch / fault)
+                    # while a session was active → finalize it now instead of
+                    # leaving a ghost "active" session in the DB.
+                    print(
+                        "🔌 Breaker desligado externamente durante sessão — finalizando"
+                    )
+                    if charging.session_uuid:
+                        finalize_charge_session(
+                            charging.session_uuid,
+                            end_energy_kwh=br_counter_kwh,
+                            soc_end=charging.effective_soc,
+                            end_reason="manual",
+                        )
+                    charging.stop(reason="manual")
+                    cfg["car_charging"] = False
+                    cfg["car_charge_start_time"] = None
+                    save_config(cfg)
+                elif br is not None:
+                    # Session active and breaker ON — feed latest readings.
                     charging.update(
-                        current_energy_kwh=br_energy_kwh,
+                        current_energy_kwh=br_counter_kwh,
                         current_power_w=br_power_w,
                         idle_power_w=cfg.get("car_charge_idle_power_w", 15),
                         idle_seconds_needed=cfg.get(
@@ -1462,19 +1540,19 @@ def poll_loop():
                         elapsed = (datetime.now() - charging.start_time).total_seconds()
                         update_charge_session_progress(
                             charging.session_uuid,
-                            current_energy_kwh=br_energy_kwh,
+                            current_energy_kwh=br_counter_kwh,
                             current_soc=charging.effective_soc,
                             duration_seconds=int(elapsed),
                             avg_power_w=charging.last_power_w,
                         )
-                    # Auto-stop when ready and config allows
+                    # Auto-stop when the car finished (idle confirmed) and allowed
                     if cfg.get(
                         "car_charge_auto_stop", True
                     ) and charging.should_auto_stop(
                         cfg.get("car_charge_idle_seconds_to_stop", 120)
                     ):
                         print(
-                            f"🔌 Auto-stopping breaker (charge complete, idle confirmed)"
+                            "🔌 Auto-stopping breaker (charge complete, idle confirmed)"
                         )
                         try:
                             d_brk = devs.get("breaker") or connect_device(
@@ -1487,10 +1565,9 @@ def poll_loop():
                             if charging.session_uuid:
                                 with state.lock:
                                     br_end = state.latest.get("breaker", {})
-                                end_energy_wh = (
+                                end_energy = (
                                     br_end.get("energy_wh", 0) if br_end else 0
                                 )
-                                end_energy = end_energy_wh if end_energy_wh else 0
                                 finalize_charge_session(
                                     charging.session_uuid,
                                     end_energy_kwh=end_energy,
@@ -1502,6 +1579,7 @@ def poll_loop():
                             save_config(cfg)
                         except Exception as e:
                             print(f"Auto-stop error: {e}")
+                # else: br is None (comms fail) → skip this cycle, retry next poll
 
             # Daily snapshot: detecta virada de dia e fecha o dia que acabou
             today = datetime.now().strftime("%Y-%m-%d")
@@ -1981,6 +2059,7 @@ def api_config_update(cfg: dict = None):
         "car_charge_start_soc",
         "car_charge_idle_seconds_to_stop",
         "car_charge_idle_power_w",
+        "car_charge_start_power_w",
         "car_charge_auto_stop",
         "cloud_enabled",
     }
