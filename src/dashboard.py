@@ -520,6 +520,9 @@ def _backfill_snapshots_from_readings():
                 if vals and len(vals) >= 2
                 else 0
             )
+            if br_kwh > 50:
+                print(f"⚠️ Breaker energy {br_kwh} kWh on {day} exceeds 50 kWh sanity cap — setting to 0")
+                br_kwh = 0
 
             if f1_kwh > 0:
                 existing = conn.execute(
