@@ -1027,18 +1027,48 @@ def db_daily_history(days=30):
             else:
                 br_daily[day] = energy
 
-        # Get last N days, fill missing with 0
+        # Collect all non-zero f1 values to compute overall average fallback
+        f1_nonzero = [v for v in f1_daily.values() if v > 0]
+        f1_overall_avg = sum(f1_nonzero) / len(f1_nonzero) if f1_nonzero else 0
+
+        # Get last N days, fill missing with 0, estimate f1 when missing but breaker exists
         result = []
         today = datetime.now().date()
-        for d in range(days - 1, -1, -1):
-            day = (today - timedelta(days=d)).strftime("%Y-%m-%d")
+        sorted_days = [(today - timedelta(days=d)).strftime("%Y-%m-%d") for d in range(days - 1, -1, -1)]
+
+        for day in sorted_days:
+            f1 = f1_daily.get(day, 0)
+            br = br_daily.get(day, 0)
+
+            # If fase1 is 0 but breaker has data, estimate house consumption
+            if f1 == 0 and br > 0:
+                # Find previous and next non-zero f1 days
+                prev_val = None
+                next_val = None
+                for other_day in sorted_days:
+                    other_f1 = f1_daily.get(other_day, 0)
+                    if other_f1 > 0:
+                        if other_day < day:
+                            prev_val = other_f1
+                        elif other_day > day and next_val is None:
+                            next_val = other_f1
+
+                if prev_val is not None and next_val is not None:
+                    f1 = round((prev_val + next_val) / 2, 4)
+                elif prev_val is not None:
+                    f1 = prev_val
+                elif next_val is not None:
+                    f1 = next_val
+                else:
+                    f1 = f1_overall_avg
+
             result.append(
                 {
                     "date": day,
-                    "consumed_kwh": f1_daily.get(day, 0),
+                    "consumed_kwh": f1,
                     "phase1_kwh": f1_daily.get(day, 0),
-                    "breaker_kwh": br_daily.get(day, 0),
-                    "cost": round(f1_daily.get(day, 0) * cost, 2),
+                    "breaker_kwh": br,
+                    "cost": round(f1 * cost, 2),
                 }
             )
 
