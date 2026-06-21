@@ -1563,7 +1563,10 @@ def api_daily_history(days: int = 30):
 
 
 def db_monthly_stats(year: int, month: int):
-    """Return monthly aggregated stats: total kWh, cost, daily breakdown."""
+    """Return monthly aggregated stats: total kWh, cost, daily breakdown.
+
+    Uses POWER × TIME integration (same as db_today_stats), not energy counter delta.
+    """
     cfg = load_config()
     cost = cfg.get("kwh_cost", 0.956)
     first = f"{year:04d}-{month:02d}-01"
@@ -1573,31 +1576,39 @@ def db_monthly_stats(year: int, month: int):
         last = f"{year:04d}-{month + 1:02d}-01"
     conn = get_db()
     try:
-        # Daily energy delta = max(energy) - min(energy) per day, summed for the month.
-        days = conn.execute(
-            """SELECT DATE(timestamp) AS day,
-                      MAX(energy) AS e_max, MIN(energy) AS e_min
+        # Get all readings with power for the month, ordered by time
+        rows = conn.execute(
+            """SELECT DATE(timestamp) AS day, timestamp, power
                FROM readings
                WHERE device = 'fase1' AND timestamp >= ? AND timestamp < ?
-                 AND energy IS NOT NULL
-               GROUP BY DATE(timestamp)
-               ORDER BY day""",
+                 AND power IS NOT NULL
+               ORDER BY timestamp""",
             (first, last),
         ).fetchall()
+
+        # Group by day for per-day integration
+        from collections import defaultdict
+        by_day = defaultdict(list)
+        for day, ts, p in rows:
+            by_day[day].append((ts, p or 0))
+
         daily = []
         total_kwh = 0.0
-        for day, e_max, e_min in days:
-            delta = max(0.0, (e_max or 0) - (e_min or 0))
-            # Tuya energy counter is in Wh, convert to kWh
-            delta_kwh = delta / 1000.0
-            total_kwh += delta_kwh
+        for day in sorted(by_day.keys()):
+            pts = by_day[day]
+            if len(pts) > 1:
+                kwh = round(_kwh_from_power_integral(pts), 4)
+            else:
+                kwh = 0
+            total_kwh += kwh
             daily.append(
                 {
                     "day": day,
-                    "kwh": round(delta_kwh, 4),
-                    "cost": round(delta_kwh * cost, 2),
+                    "kwh": kwh,
+                    "cost": round(kwh * cost, 2),
                 }
             )
+
         return {
             "year": year,
             "month": month,
