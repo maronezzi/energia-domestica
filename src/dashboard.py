@@ -407,7 +407,7 @@ def read_breaker(d):
         "switch": bool(dps.get("16", False)),
         "prepayment": bool(dps.get("11", False)),
         "balance_kwh": round(_to_num(dps.get("13", 0)) / 100, 2),
-        "energy_kwh": round(energy_wh / 100, 2) if energy_wh else 0,  # scale=2 (÷100)
+        "energy_kwh": round(energy_wh, 2) if energy_wh else 0,  # raw counter = kWh
         "energy_wh": energy_wh,
         "fault_code": _to_num(dps.get("9", 0)),
         "voltage_v": round(voltage_v, 1),
@@ -516,7 +516,7 @@ def _backfill_snapshots_from_readings():
             )
             vals = br_counter_by_day.get(day, [])
             br_kwh = (
-                round((max(vals) - min(vals)) / 100, 4)
+                round(max(vals) - min(vals), 4)
                 if vals and len(vals) >= 2
                 else 0
             )
@@ -1414,7 +1414,7 @@ def poll_loop():
                 # Use breaker's power (V×I from DPS 6) and energy (DPS 1) for charge tracking
                 br_power_w = br.get("power_w", 0) if br else 0
                 br_energy_wh = br.get("energy_wh", 0) if br else 0
-                br_energy_kwh = br_energy_wh / 100 if br_energy_wh else 0
+                br_energy_kwh = br_energy_wh if br_energy_wh else 0
                 if br:
                     charging.update(
                         current_energy_kwh=br_energy_kwh,
@@ -1457,7 +1457,7 @@ def poll_loop():
                                 end_energy_wh = (
                                     br_end.get("energy_wh", 0) if br_end else 0
                                 )
-                                end_energy = end_energy_wh / 100 if end_energy_wh else 0
+                                end_energy = end_energy_wh if end_energy_wh else 0
                                 finalize_charge_session(
                                     charging.session_uuid,
                                     end_energy_kwh=end_energy,
@@ -1492,7 +1492,7 @@ def poll_loop():
                         round(_kwh_from_power_integral(f1_rows), 4) if f1_rows else 0
                     )
                     br_kwh = (
-                        round((br_counter[0] - br_counter[1]) / 100, 4)
+                        round(br_counter[0] - br_counter[1], 4)
                         if br_counter and br_counter[0] is not None and br_counter[1] is not None
                         else 0
                     )
@@ -1774,7 +1774,7 @@ def api_car_start_charge():
         cost_per_kwh = cfg.get("kwh_cost", 0.956)
         # Use breaker energy counter (Wh) for session tracking
         start_energy_wh = br.get("energy_wh", 0)
-        start_energy = start_energy_wh / 100 if start_energy_wh else 0
+        start_energy = start_energy_wh if start_energy_wh else 0
         session = create_charge_session(
             soc_start=cfg.get("car_current_soc", 50),
             soc_target=cfg.get("car_target_soc", 80),
@@ -1820,7 +1820,7 @@ def api_car_stop_charge():
             with state.lock:
                 br_end = state.latest.get("breaker", {})
             end_energy_wh = br_end.get("energy_wh", 0) if br_end else 0
-            end_energy = end_energy_wh / 100 if end_energy_wh else 0
+            end_energy = end_energy_wh if end_energy_wh else 0
             result = finalize_charge_session(
                 charging.session_uuid,
                 end_energy_kwh=end_energy,
@@ -2064,7 +2064,7 @@ if __name__ == "__main__":
                 start_soc=_cfg.get("car_current_soc", 50),
                 target_soc=_cfg.get("car_target_soc", 80),
                 battery_kwh=_cfg.get("car_battery_kwh", 12.9),
-                start_energy_kwh=_start_wh / 100 if _start_wh else 0,
+                start_energy_kwh=_start_wh if _start_wh else 0,
             )
             charging.start_time = datetime.fromisoformat(_cfg["car_charge_start_time"])
             print(
