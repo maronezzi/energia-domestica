@@ -53,6 +53,7 @@
         /* ═══ EV Charging Card ═══ */
         .ev-card{padding:1.2rem}
         .ev-card::before{height:4px;background:linear-gradient(90deg,#00d4aa,#3b82f6,#a855f7)}
+        .ev-cards-row{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem}
         .ev-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem}
         .ev-header h2{font-size:1.3rem;font-weight:700}
         .ev-status-badge{display:flex;align-items:center;gap:.5rem;padding:.4rem 1rem;border-radius:20px;font-size:.8rem;font-weight:600;background:rgba(255,255,255,.05);border:1px solid var(--border)}
@@ -302,6 +303,7 @@
         <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">📅</div><div><div class="si-label">Custo Hoje</div><div class="si-val" style="color:var(--warn)" id="vTodayCost">R$ —</div></div></div>
     </div>
 
+    <div class="ev-cards-row">
     <!-- ═══ STATUS DO CARREGAMENTO ═══ -->
     <div class="card ev-card">
         <div class="ev-header">
@@ -500,6 +502,8 @@
             </label>
         </div>
     </div>
+
+    </div><!-- /ev-cards-row -->
 
     <!-- Phases -->
     <div class="phases-grid">
