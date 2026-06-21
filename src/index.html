@@ -302,10 +302,10 @@
         <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">📅</div><div><div class="si-label">Custo Hoje</div><div class="si-val" style="color:var(--warn)" id="vTodayCost">R$ —</div></div></div>
     </div>
 
-    <!-- ═══ CARREGAMENTO DO VEÍCULO ═══ -->
+    <!-- ═══ STATUS DO CARREGAMENTO ═══ -->
     <div class="card ev-card">
         <div class="ev-header">
-            <h2>⚡ Carregamento do Veículo</h2>
+            <h2>Status do Carregamento</h2>
             <div class="ev-status-badge" id="carStatusBadge">
                 <span class="ev-status-dot"></span>
                 <span id="carStatusText">DESLIGADO</span>
@@ -388,6 +388,38 @@
             </div>
         </div>
 
+        <!-- Idle progress -->
+        <div class="ev-idle" id="csIdleProgress" style="display:none">
+            <div class="ev-idle-text">⏳ Confirmando carga completa... <span id="csIdleCountdown">120</span>s</div>
+            <div class="ev-idle-bar"><div class="ev-idle-fill" id="csIdleFill"></div></div>
+        </div>
+
+        <!-- Alert -->
+        <div class="ev-alert" id="carAlert"></div>
+
+        <!-- Breaker info -->
+        <div class="ev-breaker">
+            <div class="ev-breaker-item">
+                <span>Energia total</span>
+                <strong><span id="brEnergy">—</span> kWh</strong>
+            </div>
+            <div class="ev-breaker-item">
+                <span>Fault</span>
+                <strong id="brFault">0</strong>
+            </div>
+            <div class="ev-breaker-item">
+                <span>Bateria</span>
+                <strong id="cibBattery">12.9 kWh</strong>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ CONTROLE DE CARGA ═══ -->
+    <div class="card">
+        <div class="ev-header">
+            <h2>Controle de Carga</h2>
+        </div>
+
         <!-- SOC Atual (input editável) -->
         <div class="ev-current-soc-section" style="background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.04);border-radius:12px;padding:1rem;margin-bottom:1rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
             <div style="flex:1;min-width:200px">
@@ -466,31 +498,6 @@
                 <input type="checkbox" id="autoStopToggle" checked onchange="toggleAutoStop()">
                 <span>Auto-desligar ao completar</span>
             </label>
-        </div>
-
-        <!-- Idle progress -->
-        <div class="ev-idle" id="csIdleProgress" style="display:none">
-            <div class="ev-idle-text">⏳ Confirmando carga completa... <span id="csIdleCountdown">120</span>s</div>
-            <div class="ev-idle-bar"><div class="ev-idle-fill" id="csIdleFill"></div></div>
-        </div>
-
-        <!-- Alert -->
-        <div class="ev-alert" id="carAlert"></div>
-
-        <!-- Breaker info -->
-        <div class="ev-breaker">
-            <div class="ev-breaker-item">
-                <span>Energia total</span>
-                <strong><span id="brEnergy">—</span> kWh</strong>
-            </div>
-            <div class="ev-breaker-item">
-                <span>Fault</span>
-                <strong id="brFault">0</strong>
-            </div>
-            <div class="ev-breaker-item">
-                <span>Bateria</span>
-                <strong id="cibBattery">12.9 kWh</strong>
-            </div>
         </div>
     </div>
 
