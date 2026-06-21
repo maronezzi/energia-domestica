@@ -313,17 +313,45 @@ def _to_num(v, default=0):
 
 
 def read_fase1(d):
-    dps = d.status().get("dps", {})
-    v_raw = _to_num(dps.get("20", 0))
-    i_raw = _to_num(dps.get("18", 0))
-    p_raw = _to_num(dps.get("19", 0))
-    e_raw = _to_num(dps.get("17", 0))
-    return {
-        "voltage": round(v_raw / 10, 1) if v_raw > 100 else 0,
-        "current": round(i_raw / 1000, 3),
-        "power": round(p_raw / 10, 1),
-        "energy": round(e_raw / 1000, 4),
-    }
+    """Read fase1 meter with retry + validation.
+
+    Returns dict on success, or None if all 3 retries fail to produce a valid
+    voltage (real voltage is 110-130V; <=50V means bad read). Energy (DPS 17)
+    is unreliable and often None — treated as optional (returned as None, not
+    a skip trigger).
+    """
+    last_err = None
+    for attempt in range(3):
+        try:
+            dps = d.status().get("dps", {})
+            v_raw = _to_num(dps.get("20", 0))
+            i_raw = _to_num(dps.get("18", 0))
+            p_raw = _to_num(dps.get("19", 0))
+            e_raw = dps.get("17")  # may be None — kept optional
+
+            voltage = round(v_raw / 10, 1) if v_raw > 100 else 0
+            if voltage > 50:
+                power = round(p_raw / 10, 1)
+                if power == 0:
+                    print(
+                        f"⚠️  fase1: voltage OK ({voltage}V) but power=0 "
+                        f"— idle state or bad read"
+                    )
+                return {
+                    "voltage": voltage,
+                    "current": round(i_raw / 1000, 3),
+                    "power": power,
+                    "energy": round(_to_num(e_raw) / 1000, 4)
+                    if e_raw is not None
+                    else None,
+                }
+            last_err = f"voltage={voltage}V (expected >50V)"
+        except Exception as e:
+            last_err = str(e)
+        if attempt < 2:
+            time.sleep(1)
+    print(f"⚠️  fase1: skipping reading after 3 attempts — {last_err}")
+    return None
 
 
 _last_valid_energy_wh = 0  # cache for DPS 1 communication errors
