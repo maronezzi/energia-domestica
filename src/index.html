@@ -51,7 +51,7 @@
         .badge-blue{background:rgba(59,130,246,.15);color:var(--accent2)}
 
         /* ═══ EV Charging Card ═══ */
-        .ev-card{padding:2rem}
+        .ev-card{padding:1.2rem}
         .ev-card::before{height:4px;background:linear-gradient(90deg,#00d4aa,#3b82f6,#a855f7)}
         .ev-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem}
         .ev-header h2{font-size:1.3rem;font-weight:700}
@@ -66,9 +66,9 @@
         @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.4}}
 
         /* Gauge */
-        .ev-center{display:flex;align-items:center;justify-content:center;gap:2rem;margin-bottom:1.5rem}
+        .ev-center{display:flex;align-items:center;justify-content:center;gap:1.5rem;margin-bottom:1.5rem}
         .ev-gauge-container{position:relative}
-        .ev-gauge{position:relative;width:220px;height:220px}
+        .ev-gauge{position:relative;width:160px;height:160px}
         .ev-gauge svg{transform:rotate(-90deg);width:100%;height:100%}
         .ev-gauge-bg{fill:none;stroke:rgba(255,255,255,.04);stroke-width:14}
         .ev-gauge-track{fill:none;stroke:rgba(255,255,255,.08);stroke-width:14}
@@ -77,7 +77,7 @@
         .ev-gauge-start{fill:none;stroke:rgba(239,68,68,.4);stroke-width:3;stroke-linecap:round;stroke-dasharray:4 530;transition:stroke-dashoffset .5s}
         .ev-gauge-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
         .ev-gauge-icon{font-size:2rem;margin-bottom:.2rem}
-        .ev-gauge-pct{font-size:3rem;font-weight:800;background:linear-gradient(135deg,#00d4aa,#3b82f6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1}
+        .ev-gauge-pct{font-size:2.2rem;font-weight:800;background:linear-gradient(135deg,#00d4aa,#3b82f6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1}
         .ev-gauge-sub{font-size:.8rem;color:var(--dim);margin-top:.3rem}
         .ev-gauge-glow{position:absolute;inset:-10px;border-radius:50%;background:radial-gradient(circle,rgba(0,212,170,.15) 0%,transparent 70%);opacity:0;transition:opacity .5s;pointer-events:none}
         .ev-gauge-glow.active{opacity:1;animation:glow-pulse 2s infinite}
@@ -90,7 +90,7 @@
         .ev-timer-lbl{font-size:.7rem;color:var(--dim);text-transform:uppercase;margin-top:.2rem}
 
         /* Stats row */
-        .ev-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:.8rem;margin-bottom:1.5rem}
+        .ev-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:.5rem;margin-bottom:1.5rem}
         .ev-stat{text-align:center;padding:.8rem .4rem;background:rgba(255,255,255,.02);border-radius:10px;border:1px solid rgba(255,255,255,.04)}
         .ev-stat-icon{font-size:1.2rem;margin-bottom:.2rem}
         .ev-stat-val{font-size:1.3rem;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
@@ -118,6 +118,9 @@
         .ev-plan-item{background:rgba(0,0,0,.2);border-radius:8px;padding:.6rem;text-align:center}
         .ev-plan-val{font-size:1.2rem;font-weight:700;color:var(--accent)}
         .ev-plan-lbl{font-size:.6rem;color:var(--dim);text-transform:uppercase;margin-top:.1rem}
+        .ev-bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;margin-bottom:1rem}
+        .ev-target-section,.ev-plan{padding:0.8rem;margin-bottom:0}
+        .ev-current-soc-section{padding:0.6rem !important;margin-bottom:0.8rem !important}
 
         /* Actions */
         .ev-actions{display:flex;gap:.8rem;align-items:center;margin-bottom:1rem}
@@ -404,6 +407,7 @@
             </div>
         </div>
 
+        <div class="ev-bottom-grid">
         <!-- SOC Target selector -->
         <div class="ev-target-section">
             <div class="ev-target-header">
@@ -447,6 +451,7 @@
                     <div class="ev-plan-lbl">meta</div>
                 </div>
             </div>
+        </div>
         </div>
 
         <!-- Action buttons -->
