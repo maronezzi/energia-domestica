@@ -1173,7 +1173,7 @@ function renderSummary(d) {
 function renderDailyChart(days) {
     if (!cDaily || !days?.length) return;
     const s = [...days].reverse();
-    cDaily.data.labels = s.map(d => d.day.split('-')[2]+'/'+d.day.split('-')[1]);
+    cDaily.data.labels = s.map(d => d.date.split('-')[2]+'/'+d.date.split('-')[1]);
     // Stacked bars: fase1 + breaker
     cDaily.data.datasets = [
         {label:'Casa (kWh)', data:s.map(d => d.fase1_kwh || d.consumed_kwh - (d.breaker_kwh||0)), backgroundColor:'rgba(0,212,170,0.7)', borderColor:'#00d4aa', borderWidth:1, borderRadius:4, stack:'stack0'},
@@ -1188,7 +1188,7 @@ function renderTable(days) {
     const tb = document.getElementById('dailyTbody');
     if (!days?.length) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:2rem">Sem dados</td></tr>'; return; }
     tb.innerHTML = [...days].reverse().map(d => {
-        const [y,m,day] = d.day.split('-');
+        const [y,m,day] = d.date.split('-');
         return `<tr><td>${day}/${m}</td><td class="num">${(d.consumed_kwh||0).toFixed(3)}</td><td class="num cost">${fmtR(d.cost||0)}</td><td class="num" style="color:var(--accent2)">${(d.breaker_kwh||0).toFixed(3)} ⚡</td><td class="num" style="color:var(--accent2)">${fmtR(d.breaker_cost||0)}</td><td class="num" style="color:var(--warn)">${(d.avg_power_w||0).toFixed(0)}</td></tr>`;
     }).join('');
 }
