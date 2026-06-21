@@ -647,7 +647,7 @@
 <div id="tab-settings" class="tab-content">
     <div class="settings">
         <h3>💰 Valor do kWh</h3>
-        <div class="s-row"><div class="s-label"><div>Preço do kWh</div><div class="desc">Valor cobrado pela concessionária</div></div><div class="s-input"><span style="color:var(--dim)">R$</span><input type="number" id="kwhInput" step="0.001" min="0"></div></div>
+        <div class="s-row"><div class="s-label"><div>Preço do kWh</div><div class="desc">Valor cobrado pela concessionária</div></div><div class="s-input"><span style="color:var(--dim)">R$</span><input type="text" id="kwhInput" inputmode="decimal" pattern="[0-9]*[.,]?[0-9]{0,3}" min="0"></div></div>
         <div class="s-row"><div class="s-label"><div>Custo atual</div></div><div class="s-input"><span style="color:var(--dim)">R$</span><input id="kwhDisplay" readonly style="background:transparent;border:none;color:var(--accent);font-weight:700"></div></div>
         <div style="margin-top:1rem"><button class="btn-save" onclick="saveKwh()">💾 Salvar</button></div>
         <div class="alert ok" id="settingsOk" style="display:none">✅ Salvo!</div>
@@ -1329,8 +1329,10 @@ async function clearDb() {
 
 // ─── SETTINGS ───
 async function saveKwh() {
-    const v = parseFloat(document.getElementById('kwhInput').value);
+    const raw = document.getElementById('kwhInput').value.replace(',', '.');
+    const v = parseFloat(raw);
     if (isNaN(v) || v <= 0) return;
+    document.getElementById('kwhInput').value = raw;
     await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({kwh_cost:v})});
     kwhCost = v; document.getElementById('kwhDisplay').value = v.toFixed(3);
     const a = document.getElementById('settingsOk'); a.style.display = 'block'; setTimeout(()=>a.style.display='none',3000);
