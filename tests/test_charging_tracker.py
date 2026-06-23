@@ -157,6 +157,87 @@ class TestChargeSessionDB(unittest.TestCase):
         self.assertAlmostEqual(summary["total_kwh"], 4.5, places=2)  # 2 + 2.5
         self.assertGreater(summary["total_cost"], 0)
 
+    def test_create_session_finalizes_existing_active(self):
+        """Regression test for the "today's measurements broken across multiple
+        lines" bug: when a new session is created, any leftover active row from
+        a previous (unfinalized) charging event MUST be finalized first, so the
+        Carregamentos tab never shows N rows for the same logical event."""
+        from dashboard import (
+            create_charge_session,
+            list_charge_sessions,
+        )
+        # Simulate the buggy state: a previous session was never finalized
+        s_old = create_charge_session(20, 80, 12.9, 100.0, 0.956)
+        self.assertEqual(s_old["status"], "active")
+        # Create a new session (e.g. user clicked "Start" again, or auto-detect
+        # fired while a ghost session was still in the DB)
+        s_new = create_charge_session(50, 80, 12.9, 200.0, 0.956)
+        # Exactly ONE row should be active
+        all_sessions = list_charge_sessions(limit=50, include_active=True)
+        actives = [s for s in all_sessions if s["status"] == "active"]
+        self.assertEqual(len(actives), 1, "expected exactly one active session")
+        self.assertEqual(actives[0]["session_uuid"], s_new["session_uuid"])
+        # The old row was auto-finalized
+        self.assertNotEqual(s_old["session_uuid"], s_new["session_uuid"])
+
+    def test_finalize_stale_active_sessions_helper(self):
+        """`finalize_stale_active_sessions` finalizes every active row except
+        the one explicitly kept (used by startup recovery to repair DBs that
+        already contain ghost active rows from before the fix)."""
+        import dashboard
+        from dashboard import (
+            finalize_stale_active_sessions,
+            list_charge_sessions,
+        )
+        # Simulate legacy ghost active rows by inserting directly via SQL,
+        # bypassing `create_charge_session` (which would auto-fix the bug).
+        conn = dashboard.get_db()
+        try:
+            ghosts = []
+            for soc, energy in [(20, 10.0), (30, 20.0), (40, 30.0)]:
+                uuid = f"ghost-{soc}-{energy}"
+                conn.execute(
+                    "INSERT INTO charge_sessions"
+                    " (session_uuid, start_time, status, soc_start, soc_target,"
+                    "  battery_kwh, start_energy_kwh, cost_per_kwh)"
+                    " VALUES (?, ?, 'active', ?, 80, 12.9, ?, 0.956)",
+                    (uuid, "2026-06-22T18:00:00", soc, energy),
+                )
+                ghosts.append(uuid)
+            conn.commit()
+        finally:
+            conn.close()
+
+        keep = ghosts[1]
+        finalized = finalize_stale_active_sessions(reason="manual", keep_uuid=keep)
+        self.assertEqual(set(finalized), {ghosts[0], ghosts[2]})
+        actives = [
+            s for s in list_charge_sessions(limit=50, include_active=True)
+            if s["status"] == "active"
+        ]
+        self.assertEqual(len(actives), 1)
+        self.assertEqual(actives[0]["session_uuid"], keep)
+
+    def test_list_charge_sessions_active_sorted_first(self):
+        """`list_charge_sessions(include_active=True)` must surface the active
+        session first even when finished sessions are newer in start_time
+        (defensive guard against legacy ghost rows)."""
+        from dashboard import (
+            create_charge_session,
+            finalize_charge_session,
+            list_charge_sessions,
+        )
+        # Finished session that started AFTER the active one
+        finished = create_charge_session(20, 80, 12.9, 100.0, 0.956)
+        finalize_charge_session(
+            finished["session_uuid"], end_energy_kwh=110.0, soc_end=70.0
+        )
+        # Now an active session with a smaller id (started before the finished)
+        active = create_charge_session(40, 80, 12.9, 50.0, 0.956)
+        rows = list_charge_sessions(limit=50, include_active=True)
+        self.assertEqual(rows[0]["session_uuid"], active["session_uuid"])
+        self.assertEqual(rows[0]["status"], "active")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -615,7 +615,13 @@ import uuid as _uuid
 def create_charge_session(
     soc_start, soc_target, battery_kwh, start_energy_kwh, cost_per_kwh
 ):
-    """Insert a new active charge session. Returns the session dict (with id, uuid)."""
+    """Insert a new active charge session. Returns the session dict (with id, uuid).
+
+    Invariant: only ONE session may be `status='active'` at any time. Any
+    leftover active rows from a previous (unfinalized) charging event are
+    finalized first so today's measurements don't break into multiple lines.
+    """
+    finalize_stale_active_sessions(reason="manual")
     session_uuid = str(_uuid.uuid4())
     now = datetime.now().isoformat()
     conn = get_db()
@@ -765,6 +771,57 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
         conn.close()
 
 
+def finalize_stale_active_sessions(
+    end_energy_kwh=None, current_soc=None, reason="manual", keep_uuid=None
+):
+    """Finalize any leftover `status='active'` rows.
+
+    Bug guard: at most ONE charge session should be live at a time. If a previous
+    session was never finalized (e.g. service crash, breaker toggled externally,
+    /api/car/start-charge called twice), the DB would show multiple "active"
+    rows for the same logical charging event — breaking today's measurements
+    across multiple lines in the Carregamentos tab.
+
+    Call this BEFORE creating a new session, and during DB recovery on startup.
+    Returns the list of finalized session_uuids (for logging).
+
+    Pass `keep_uuid` to leave a specific session active (used by startup
+    recovery to rehydrate the most recent live session).
+    """
+    conn = get_db()
+    finalized = []
+    try:
+        rows = conn.execute(
+            "SELECT session_uuid, start_time, start_energy_kwh, cost_per_kwh,"
+            " battery_kwh, soc_start"
+            " FROM charge_sessions WHERE status = 'active'"
+        ).fetchall()
+        if not rows:
+            return finalized
+        for row in rows:
+            (s_uuid, start_ts, start_e, cost, bat, soc_s) = row
+            if keep_uuid and s_uuid == keep_uuid:
+                continue
+            end_e = end_energy_kwh if end_energy_kwh is not None else (start_e or 0)
+            try:
+                _ = finalize_charge_session(
+                    s_uuid,
+                    end_energy_kwh=end_e,
+                    soc_end=current_soc,
+                    end_reason=reason,
+                )
+                finalized.append(s_uuid)
+                print(
+                    f"🧹 Finalized stale active session {s_uuid[:8]} "
+                    f"(reason={reason})"
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to finalize stale session {s_uuid[:8]}: {e}")
+    finally:
+        conn.close()
+    return finalized
+
+
 def get_active_charge_session():
     """Return the currently active session (status='active'), or None."""
     conn = get_db()
@@ -794,7 +851,13 @@ def get_active_charge_session():
 
 
 def list_charge_sessions(limit=50, include_active=False):
-    """Return recent charge sessions, most recent first."""
+    """Return recent charge sessions, most recent first.
+
+    When `include_active=True`, only the most recent active session is
+    returned — invariants in `create_charge_session` guarantee at most one
+    live session, but defensive guard in case older "ghost" active rows
+    predate the fix.
+    """
     conn = get_db()
     try:
         if include_active:
@@ -803,7 +866,10 @@ def list_charge_sessions(limit=50, include_active=False):
                           soc_target, battery_kwh, start_energy_kwh, end_energy_kwh,
                           energy_delivered_kwh, duration_seconds, avg_power_w, cost_per_kwh, total_cost, end_reason
                    FROM charge_sessions
-                   ORDER BY start_time DESC LIMIT ?""",
+                   ORDER BY
+                       CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+                       start_time DESC
+                   LIMIT ?""",
                 (limit,),
             ).fetchall()
         else:
@@ -2140,12 +2206,25 @@ if __name__ == "__main__":
     if _cfg.get("car_charging"):
         _conn = get_db()
         try:
-            _row = _conn.execute(
-                "SELECT session_uuid, start_time, soc_start, soc_target, battery_kwh, start_energy_kwh, cost_per_kwh"
-                " FROM charge_sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1"
-            ).fetchone()
+            _active_rows = _conn.execute(
+                "SELECT id, session_uuid, start_time, soc_start, soc_target, battery_kwh,"
+                " start_energy_kwh, cost_per_kwh FROM charge_sessions"
+                " WHERE status = 'active' ORDER BY id DESC"
+            ).fetchall()
         finally:
             _conn.close()
+
+        # Bug guard: if there are multiple actives, finalize all but the latest
+        # so today's measurements don't show N rows for one charging event.
+        if len(_active_rows) > 1:
+            print(
+                f"⚠️ Found {len(_active_rows)} active charge sessions on startup"
+                f" — finalizing all but the latest"
+            )
+            _row = _active_rows[0]
+            finalize_stale_active_sessions(reason="manual", keep_uuid=_row[1])
+        else:
+            _row = _active_rows[0] if _active_rows else None
 
         if _row:
             _uuid, _start_ts, _soc_start, _soc_target, _bat, _start_e, _cost = _row

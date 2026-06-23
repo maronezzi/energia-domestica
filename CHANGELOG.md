@@ -19,6 +19,7 @@
 - ✏️ **Bugfix**: `no_balance_alarm` agora detectado via fault_code bitfield
 - ✏️ **Bugfix**: dashboard tinha layout quebrado nos breaker cards (faltava CSS)
 - ✏️ **Bugfix**: `phase_a` agora formatado como inteiro (mA)
+- ✏️ **Bugfix**: aba Carregamentos mostrava várias linhas pra mesma sessão de carga de hoje — agora `create_charge_session` finaliza automaticamente sessões `active` órfãs antes de criar uma nova, e `list_charge_sessions` ordena o registro ativo primeiro (defesa em profundidade). Recuperação no startup também limpa ghosts antigos.
 - ✏️ Refatorado: credenciais agora em `data/devices.json` (não hardcoded)
 - ✏️ Refatorado: BASE_DIR aponta pro raiz do projeto, DB em `data/`
 
