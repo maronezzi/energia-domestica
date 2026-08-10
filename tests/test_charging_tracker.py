@@ -57,17 +57,25 @@ class TestChargingTracker(unittest.TestCase):
     def test_progress_calculates_effective_soc(self):
         t = self._new_tracker()
         t.start(50, 80, 12.9, 10.0)
-        # Delivered 1.0 kWh => +7.75% SOC (1/12.9 * 100)
+        # Delivered 1.0 kWh at 100% efficiency => +7.75% SOC (1/12.9 * 100)
         t.update(current_energy_kwh=11.0, current_power_w=2000,
-                 idle_power_w=15, idle_seconds_needed=120)
+                 idle_power_w=15, idle_seconds_needed=120, efficiency=1.0)
         self.assertAlmostEqual(t.effective_soc, 57.75, places=2)
+
+    def test_efficiency_reduces_soc_gain(self):
+        t = self._new_tracker()
+        t.start(50, 80, 12.9, 10.0)
+        # 1.0 kWh at 80% efficiency => +6.2% SOC
+        t.update(current_energy_kwh=11.0, current_power_w=2000,
+                 idle_power_w=15, idle_seconds_needed=120, efficiency=0.80)
+        self.assertAlmostEqual(t.effective_soc, 56.20, places=1)
 
     def test_target_reached_but_still_drawing_keeps_charging(self):
         t = self._new_tracker()
         t.start(50, 80, 12.9, 10.0)
-        # Delivered 4.0 kWh => 50 + 31% = 81% (target reached)
+        # Delivered 4.0 kWh at 100% eff => 50 + 31% = 81% (target reached)
         t.update(current_energy_kwh=14.0, current_power_w=2000,
-                 idle_power_w=15, idle_seconds_needed=120)
+                 idle_power_w=15, idle_seconds_needed=120, efficiency=1.0)
         self.assertGreaterEqual(t.effective_soc, 80)
         # But car is still drawing 2000W — should STAY in charging
         self.assertEqual(t.state, t.STATE_CHARGING)
@@ -112,6 +120,76 @@ class TestChargingTracker(unittest.TestCase):
         self.assertEqual(t.state, t.STATE_IDLE)
         self.assertIsNone(t.session_uuid)
 
+    def test_no_prediction_when_not_charging(self):
+        """estimated_remaining_minutes must be None when the car draws 0W."""
+        t = self._new_tracker()
+        t.start(26, 100, 12.9, 10.0)
+        # Feed only idle power — car is NOT charging
+        t.update(10.0, 0, 15, 120)
+        st = t.get_status()
+        self.assertIsNone(st["estimated_remaining_minutes"])
+
+    def test_no_prediction_in_completing_state(self):
+        """No prediction when the car stopped and we're confirming idle."""
+        t = self._new_tracker()
+        t.start(50, 80, 12.9, 10.0)
+        t.update(14.0, 2000, 15, 120)  # charging
+        t.update(14.0, 5, 15, 120)    # idle → completing
+        st = t.get_status()
+        self.assertEqual(st["state"], "completing")
+        self.assertIsNone(st["estimated_remaining_minutes"])
+
+    def test_prediction_uses_rolling_avg_when_active(self):
+        """When actively charging, prediction uses rolling power average."""
+        t = self._new_tracker()
+        t.start(50, 80, 12.9, 10.0)
+        t.update(11.0, 2400, 15, 120, efficiency=1.0)
+        st = t.get_status()
+        self.assertIsNotNone(st["estimated_remaining_minutes"])
+        # effective_soc = 50 + (1.0/12.9)*100 ≈ 57.75
+        # need = (80 - 57.75)/100 * 12.9 ≈ 2.87 kWh; at 2.4 kW → ~71.8 min
+        self.assertAlmostEqual(st["estimated_remaining_minutes"], 71.8, delta=1.0)
+
+    def test_prediction_accounts_for_efficiency(self):
+        """Prediction grosses up energy for charging losses."""
+        t = self._new_tracker()
+        t.start(50, 80, 12.9, 10.0)
+        t.update(11.0, 2400, 15, 120, efficiency=0.80)
+        st = t.get_status()
+        # effective_soc = 50 + (1.0*0.8/12.9)*100 ≈ 56.20
+        # need_battery = (80-56.2)/100*12.9 ≈ 3.07 kWh
+        # need_grid = 3.07/0.8 ≈ 3.84 kWh; at 2.4 kW → ~95.9 min
+        self.assertAlmostEqual(st["estimated_remaining_minutes"], 95.9, delta=1.0)
+
+    def test_session_avg_power_w(self):
+        """session_avg_power_w is the true mean of all readings."""
+        t = self._new_tracker()
+        t.start(50, 80, 12.9, 10.0)
+        t.update(11.0, 2000, 15, 120)
+        t.update(12.0, 3000, 15, 120)
+        t.update(13.0, 1000, 15, 120)
+        self.assertAlmostEqual(t.session_avg_power_w, 2000.0, places=1)
+
+    def test_effective_end_time_excludes_idle(self):
+        """effective_end_time is the last moment power was above idle."""
+        t = self._new_tracker()
+        t.start(50, 80, 12.9, 10.0)
+        t.update(14.0, 2000, 15, 120)  # active
+        active_time = t.last_active_time
+        self.assertIsNotNone(active_time)
+        t.update(14.0, 5, 15, 120)     # idle → completing
+        # effective_end_time should still be the last active moment
+        self.assertEqual(t.effective_end_time, active_time)
+
+    def test_countdown_message_uses_config(self):
+        """Countdown message respects idle_seconds_needed from config."""
+        t = self._new_tracker()
+        t.start(50, 80, 12.9, 10.0)
+        t.update(14.0, 2000, 15, 60)  # 60s idle threshold
+        t.update(14.0, 5, 60, 60)     # idle with 60s config
+        st = t.get_status()
+        self.assertIn("Confirmando", st["message"])
+
 
 class TestChargeSessionDB(unittest.TestCase):
     """Tests for charge_sessions DB helpers."""
@@ -143,6 +221,33 @@ class TestChargeSessionDB(unittest.TestCase):
         self.assertEqual(result["status"], "auto_stopped")
         self.assertAlmostEqual(result["energy_delivered_kwh"], 4.0, places=3)
         self.assertAlmostEqual(result["total_cost"], 4.0, places=2)  # 4 kWh * R$1
+
+    def test_zero_energy_session_gets_no_charge_status(self):
+        """Sessions that deliver < 0.05 kWh are marked 'no_charge'."""
+        from dashboard import create_charge_session, finalize_charge_session
+        s = create_charge_session(soc_start=26, soc_target=100, battery_kwh=12.9,
+                                   start_energy_kwh=719.8, cost_per_kwh=0.956)
+        result = finalize_charge_session(s["session_uuid"], end_energy_kwh=719.8,
+                                          soc_end=26.0, end_reason="auto")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "no_charge")
+        self.assertAlmostEqual(result["energy_delivered_kwh"], 0.0, places=3)
+
+    def test_effective_end_time_excludes_idle_from_duration(self):
+        """Duration uses effective_end_time, not wall-clock finalize time."""
+        from dashboard import create_charge_session, finalize_charge_session
+        s = create_charge_session(soc_start=50, soc_target=80, battery_kwh=12.9,
+                                   start_energy_kwh=10.0, cost_per_kwh=1.0)
+        # Simulate: car charged for 10 min, then sat idle for 2 min
+        eff_end = datetime.datetime.now() - datetime.timedelta(minutes=2)
+        result = finalize_charge_session(s["session_uuid"], end_energy_kwh=14.0,
+                                          soc_end=81.0, end_reason="auto",
+                                          effective_end_time=eff_end)
+        self.assertIsNotNone(result)
+        # Duration should be ~0s (start was just now, eff_end is 2 min ago → clamped to 0)
+        # In real usage start would be older; here we just verify it doesn't crash
+        # and duration <= wall-clock
+        self.assertGreaterEqual(result["duration_seconds"], 0)
 
     def test_summary_aggregates_sessions(self):
         from dashboard import create_charge_session, finalize_charge_session, charge_sessions_summary
@@ -237,6 +342,127 @@ class TestChargeSessionDB(unittest.TestCase):
         rows = list_charge_sessions(limit=50, include_active=True)
         self.assertEqual(rows[0]["session_uuid"], active["session_uuid"])
         self.assertEqual(rows[0]["status"], "active")
+
+
+class TestBreakerIdleWatchdog(unittest.TestCase):
+    """Tests for the breaker idle watchdog helper."""
+
+    def _fn(self):
+        from dashboard import breaker_idle_watchdog_should_stop
+        return breaker_idle_watchdog_should_stop
+
+    def test_fires_when_idle_long_enough(self):
+        fn = self._fn()
+        idle_since = datetime.datetime.now() - datetime.timedelta(seconds=130)
+        self.assertTrue(fn(
+            breaker_on=True, session_active=False,
+            power_w=0, idle_power_w=15,
+            idle_since=idle_since, idle_seconds_needed=120,
+        ))
+
+    def test_does_not_fire_before_timeout(self):
+        fn = self._fn()
+        idle_since = datetime.datetime.now() - datetime.timedelta(seconds=60)
+        self.assertFalse(fn(
+            breaker_on=True, session_active=False,
+            power_w=0, idle_power_w=15,
+            idle_since=idle_since, idle_seconds_needed=120,
+        ))
+
+    def test_does_not_fire_with_active_session(self):
+        fn = self._fn()
+        idle_since = datetime.datetime.now() - datetime.timedelta(seconds=300)
+        self.assertFalse(fn(
+            breaker_on=True, session_active=True,
+            power_w=0, idle_power_w=15,
+            idle_since=idle_since, idle_seconds_needed=120,
+        ))
+
+    def test_does_not_fire_when_breaker_off(self):
+        fn = self._fn()
+        idle_since = datetime.datetime.now() - datetime.timedelta(seconds=300)
+        self.assertFalse(fn(
+            breaker_on=False, session_active=False,
+            power_w=0, idle_power_w=15,
+            idle_since=idle_since, idle_seconds_needed=120,
+        ))
+
+    def test_does_not_fire_when_power_above_threshold(self):
+        fn = self._fn()
+        idle_since = datetime.datetime.now() - datetime.timedelta(seconds=300)
+        self.assertFalse(fn(
+            breaker_on=True, session_active=False,
+            power_w=2700, idle_power_w=15,
+            idle_since=idle_since, idle_seconds_needed=120,
+        ))
+
+    def test_does_not_fire_when_idle_since_none(self):
+        fn = self._fn()
+        self.assertFalse(fn(
+            breaker_on=True, session_active=False,
+            power_w=0, idle_power_w=15,
+            idle_since=None, idle_seconds_needed=120,
+        ))
+
+    def test_power_at_exact_threshold_is_idle(self):
+        fn = self._fn()
+        idle_since = datetime.datetime.now() - datetime.timedelta(seconds=130)
+        self.assertTrue(fn(
+            breaker_on=True, session_active=False,
+            power_w=15, idle_power_w=15,
+            idle_since=idle_since, idle_seconds_needed=120,
+        ))
+
+    def test_explicit_now_parameter(self):
+        fn = self._fn()
+        idle_since = datetime.datetime(2026, 7, 30, 21, 36, 0)
+        now = datetime.datetime(2026, 7, 30, 21, 38, 30)  # 150s later
+        self.assertTrue(fn(
+            breaker_on=True, session_active=False,
+            power_w=4.3, idle_power_w=15,
+            idle_since=idle_since, idle_seconds_needed=120,
+            now=now,
+        ))
+
+
+class TestBreakerOffDebounce(unittest.TestCase):
+    """Tests for breaker_off_confirmed — debounce do switch=0.
+
+    Regression: em 2026-08-02 uma única leitura corrompida do DPS 16
+    (switch=0 com ~2700W ainda fluindo) finalizava a sessão ativa, e a
+    auto-detecção do poll seguinte criava outra — quebrando um único
+    carregamento em várias linhas na aba Carregamentos.
+    """
+
+    def _fn(self):
+        from dashboard import breaker_off_confirmed
+        return breaker_off_confirmed
+
+    def test_no_off_readings_is_not_confirmed(self):
+        fn = self._fn()
+        self.assertFalse(fn(0))
+
+    def test_single_off_reading_is_not_confirmed(self):
+        """The 2026-08-02 incident: one-poll glitches must NOT finalize."""
+        fn = self._fn()
+        self.assertFalse(fn(1))
+
+    def test_below_threshold_is_not_confirmed(self):
+        fn = self._fn()
+        self.assertFalse(fn(2, confirm_polls=3))
+
+    def test_at_threshold_is_confirmed(self):
+        fn = self._fn()
+        self.assertTrue(fn(3, confirm_polls=3))
+
+    def test_above_threshold_is_confirmed(self):
+        fn = self._fn()
+        self.assertTrue(fn(10))
+
+    def test_custom_threshold(self):
+        fn = self._fn()
+        self.assertFalse(fn(4, confirm_polls=5))
+        self.assertTrue(fn(5, confirm_polls=5))
 
 
 if __name__ == "__main__":

@@ -168,6 +168,7 @@
         .data-table .status-badge.completed{background:rgba(34,197,94,.15);color:var(--ok)}
         .data-table .status-badge.auto_stopped{background:rgba(59,130,246,.15);color:var(--accent2)}
         .data-table .status-badge.aborted{background:rgba(239,68,68,.15);color:var(--danger)}
+        .data-table .status-badge.no_charge{background:rgba(255,255,255,.08);color:var(--dim)}
         .data-table .status-badge.active{background:rgba(245,158,11,.15);color:var(--warn)}
         .table-wrap{overflow-x:auto;border-radius:8px;border:1px solid var(--border)}
         
@@ -1299,6 +1300,7 @@ async function loadCharges() {
                 'completed': 'OK',
                 'auto_stopped': 'AUTO',
                 'aborted': 'INTERROMPIDO',
+                'no_charge': 'SEM CARGA',
             })[s.status] || s.status;
             return `<tr>
                 <td>${fmtDateTime(s.start_time)}</td>

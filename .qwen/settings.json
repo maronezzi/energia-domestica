@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl *)",
+      "Bash(python3 *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(/home/bruno/projects/energia-domestica/.venv_energia/bin/python3 *)",
+      "Bash(systemctl *)",
+      "Bash(pgrep *)",
+      "Bash(echo *)",
+      "Bash(sudo *)",
+      "Bash(sleep *)",
+      "Bash(tail *)",
+      "Bash(journalctl *)"
+    ]
+  },
+  "$version": 4
+}
