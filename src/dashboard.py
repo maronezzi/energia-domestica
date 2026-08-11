@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 import base64
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 import os
@@ -381,6 +381,7 @@ def read_fase1(d):
 
 
 _last_valid_energy_wh = 0  # cache for DPS 1 communication errors
+_br_energy_samples = deque(maxlen=200)  # (ts, DPS1 raw) p/ estimar potencia via delta do contador
 
 
 def read_breaker(d):
@@ -427,7 +428,21 @@ def read_breaker(d):
     except Exception:
         pass  # fallback: voltage/current stay 0
 
-    power_w = round(voltage_v * current_a, 1)  # V × A = W
+    power_w = round(voltage_v * current_a, 1)  # V × A = W (DPS 6 — este breaker nao responde ao UPDATEDPS)
+
+    # Estimador de potencia viva via delta do contador cumulativo (DPS 1).
+    # Resolucao do contador: 1 raw = 10 Wh. Janela de ~2min suaviza a quantizacao
+    # (a 2400W o contador anda ~4 unidades/60s). Saneado: sem retrocesso, cap 12kW.
+    now = time.time()
+    _br_energy_samples.append((now, energy_wh))
+    while len(_br_energy_samples) > 1 and _br_energy_samples[0][0] < now - 120:
+        _br_energy_samples.popleft()
+    if len(_br_energy_samples) >= 2:
+        t0, e0 = _br_energy_samples[0]
+        dt = now - t0
+        de = energy_wh - e0
+        if power_w == 0 and dt >= 45 and 0 <= de <= 5000:
+            power_w = min(de * 10.0 * 3600.0 / dt, 12000.0)
 
     return {
         "switch": bool(dps.get("16", False)),
