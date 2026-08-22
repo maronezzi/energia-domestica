@@ -100,7 +100,55 @@ state = State()
 
 # ─── DB ────────────────────────────────────────────────────────
 def get_db():
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    return conn
+
+
+# ─── TTL cache (evita recomputar agregados caros a cada request) ───
+_ttl_cache: dict = {}
+_ttl_lock = threading.Lock()
+
+
+def _ttl_get(key, ttl):
+    with _ttl_lock:
+        hit = _ttl_cache.get(key)
+        if hit and (time.time() - hit[0]) < ttl:
+            return hit[1]
+    return None
+
+
+def _ttl_put(key, value):
+    with _ttl_lock:
+        _ttl_cache[key] = (time.time(), value)
+
+
+def _sql_kwh(conn, col: str, start: str, end: str, min_avg_w: float = 0.0) -> float:
+    """Integrate power×time (kWh) entirely in SQL for [start, end).
+
+    Equivalent to _kwh_from_power_integral() but returns a single row instead
+    of streaming tens of thousands of readings into Python — critical on the
+    low-power CubieBoard. Range predicates keep the idx_device_time index seek;
+    gaps >120 s are ignored (device offline). min_avg_w filters noise pairs.
+    """
+    row = conn.execute(
+        f"""
+        WITH p AS (
+            SELECT {col} AS w,
+                   LAG({col}) OVER (ORDER BY timestamp) AS prev_w,
+                   (julianday(timestamp)
+                     - LAG(julianday(timestamp)) OVER (ORDER BY timestamp)) * 86400.0 AS dt_s
+            FROM readings
+            WHERE device='fase1' AND timestamp >= ? AND timestamp < ? AND {col} IS NOT NULL
+        )
+        SELECT ROUND(SUM((prev_w + w) / 2000.0 * (dt_s / 3600.0)), 4)
+        FROM p
+        WHERE dt_s > 0 AND dt_s < 120 AND ((prev_w + w) / 2.0) >= ?
+        """,
+        (start, end, min_avg_w),
+    ).fetchone()
+    return round(row[0] or 0.0, 4)
 
 
 # ─── Charge history (for prediction improvement) ──────────────
@@ -148,6 +196,8 @@ def get_avg_charge_rate() -> float:
 
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    # WAL: readers (dashboard) never block the writer (poll_loop inserts).
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS readings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,16 +315,28 @@ def prune_db():
 
 
 # ─── Config ────────────────────────────────────────────────────
+_cfg_cache: tuple = None  # (ts, cfg)
+
+
 def load_config():
+    global _cfg_cache
+    now = time.time()
+    if _cfg_cache and (now - _cfg_cache[0]) < 2:
+        return {**_cfg_cache[1]}  # shallow copy: callers may mutate
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE) as f:
-            return {**DEFAULT_CONFIG, **json.load(f)}
-    return DEFAULT_CONFIG.copy()
+            cfg = {**DEFAULT_CONFIG, **json.load(f)}
+    else:
+        cfg = DEFAULT_CONFIG.copy()
+    _cfg_cache = (now, cfg)
+    return {**cfg}
 
 
 def save_config(cfg):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
+    global _cfg_cache
+    _cfg_cache = (time.time(), {**cfg})
 
 
 init_db()
@@ -1009,98 +1071,46 @@ def db_today_stats():
 
     Uses POWER × TIME integral (much more accurate than energy counter delta).
     Handles resets automatically since we track power directly.
+    All integrals run in SQL (single-row results) instead of pulling every
+    reading of the month into Python.
     """
     cfg = load_config()
     cost = cfg.get("kwh_cost", 0.956)
-    today = datetime.now().strftime("%Y-%m-%d")
-    month_str = datetime.now().strftime("%Y-%m")
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    month_start = now.strftime("%Y-%m-01")
 
     conn = get_db()
     try:
-        # Get today's readings
-        rows = conn.execute(
-            "SELECT timestamp, power, energy FROM readings WHERE device='fase1' AND DATE(timestamp)=? ORDER BY timestamp",
-            (today,),
-        ).fetchall()
+        # Today + breaker integrals: bounded index-range queries in SQL.
+        today_kwh = _sql_kwh(conn, "power", today, tomorrow)
+        breaker_kwh = _sql_kwh(conn, "phase_c", today, tomorrow, min_avg_w=1.0)
 
-        if not rows:
-            return {
-                "today_kwh": 0,
-                "today_cost": 0,
-                "month_kwh": 0,
-                "month_cost": 0,
-                "kwh_cost": cost,
-                "source": "local",
-            }
-
-        # Calculate consumption via POWER × TIME (the correct way)
-        total_kwh = 0.0
-        for i in range(1, len(rows)):
-            t1, p1, e1 = rows[i - 1]
-            t2, p2, e2 = rows[i]
-
-            dt1 = datetime.fromisoformat(t1)
-            dt2 = datetime.fromisoformat(t2)
-            dt_seconds = (dt2 - dt1).total_seconds()
-
-            if 0 < dt_seconds < 120:  # sanity: max 2 min gap
-                # Power is in W, convert to kW and multiply by hours
-                avg_power_w = (p1 + p2) / 2
-                kwh = (avg_power_w / 1000) * (dt_seconds / 3600)
-                total_kwh += kwh
-
-        today_kwh = round(total_kwh, 4)
-
-        # Month: POWER × TIME integral over all days of current month (robust, no snapshot dependency).
-        # Falls back to daily_snapshots sum only if no readings exist (shouldn't happen post-backfill).
-        month_start = datetime.now().strftime("%Y-%m-01")
-        month_rows = conn.execute(
-            "SELECT timestamp, power FROM readings "
-            "WHERE device='fase1' AND DATE(timestamp)>=? AND power IS NOT NULL "
-            "ORDER BY timestamp",
-            (month_start,),
-        ).fetchall()
-        if month_rows and len(month_rows) > 1:
-            month_kwh = round(_kwh_from_power_integral(month_rows), 4)
-        else:
-            month_row = conn.execute(
-                "SELECT SUM(energy_kwh) FROM daily_snapshots WHERE snapshot_date>=? AND device='fase1'",
-                (month_start,),
-            ).fetchone()
-            month_kwh = round(max(0, (month_row[0] or 0) if month_row else 0), 4)
-
-        # Get readings count for verification
         count = conn.execute(
-            "SELECT COUNT(*) FROM readings WHERE device='fase1' AND DATE(timestamp)=?",
-            (today,),
+            "SELECT COUNT(*) FROM readings WHERE device='fase1' AND timestamp>=? AND timestamp<?",
+            (today, tomorrow),
         ).fetchone()[0]
 
-        # BREAKER: Calculate breaker consumption via stored power readings
-        # phase_c now stores breaker_power_w (V × I from DPS 6)
-        br_rows = conn.execute(
-            "SELECT timestamp, phase_c FROM readings WHERE device='fase1' AND DATE(timestamp)=? ORDER BY timestamp",
-            (today,),
-        ).fetchall()
-
-        breaker_kwh = 0.0
-        if br_rows:
-            for i in range(1, len(br_rows)):
-                t1, pw1 = br_rows[i - 1]
-                t2, pw2 = br_rows[i]
-
-                if pw1 is None or pw2 is None:
-                    continue
-
-                dt1 = datetime.fromisoformat(t1)
-                dt2 = datetime.fromisoformat(t2)
-                dt_seconds = (dt2 - dt1).total_seconds()
-
-                if 0 < dt_seconds < 120:
-                    avg_power_w = (pw1 + pw2) / 2
-                    if avg_power_w > 1:
-                        breaker_kwh += (avg_power_w / 1000) * (dt_seconds / 3600)
-
-        breaker_kwh = round(breaker_kwh, 4)
+        # Month-to-date integral scans the whole month → recompute at most
+        # every 60 s (changes negligibly between polls).
+        mkey = ("month_kwh", month_start)
+        month_kwh = _ttl_get(mkey, 60)
+        if month_kwh is None:
+            has_month = conn.execute(
+                "SELECT 1 FROM readings WHERE device='fase1' AND timestamp>=? LIMIT 1",
+                (month_start,),
+            ).fetchone()
+            if has_month:
+                month_kwh = _sql_kwh(conn, "power", month_start, tomorrow)
+            else:
+                # No readings this month: fall back to daily snapshot sums.
+                row = conn.execute(
+                    "SELECT SUM(energy_kwh) FROM daily_snapshots WHERE snapshot_date>=? AND device='fase1'",
+                    (month_start,),
+                ).fetchone()
+                month_kwh = round(max(0, (row[0] or 0) if row else 0), 4)
+            _ttl_put(mkey, month_kwh)
 
         return {
             "today_kwh": today_kwh,
@@ -1121,15 +1131,21 @@ def db_daily_history(days=30):
 
     Snapshots store **consumed kWh per day** (already integrated from power×time),
     not cumulative readings — so we return them directly without diffing.
+    Queries are bounded to the requested window so the index does the work.
     """
     cfg = load_config()
     cost = cfg.get("kwh_cost", 0.956)
 
     conn = get_db()
     try:
-        # Get all snapshots
+        today = datetime.now().date()
+        start_day = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        tomorrow = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Get snapshots within the window only
         snap_rows = conn.execute(
-            "SELECT snapshot_date, device, energy_kwh FROM daily_snapshots ORDER BY snapshot_date",
+            "SELECT snapshot_date, device, energy_kwh FROM daily_snapshots WHERE snapshot_date>=?",
+            (start_day,),
         ).fetchall()
 
         f1_daily = {}
@@ -1141,46 +1157,35 @@ def db_daily_history(days=30):
             else:
                 br_daily[day] = energy
 
-        # Get average power per day from readings (used for avg_power_w column)
+        # Average power per day, bounded to the window (was: full-table GROUP BY)
         avg_p_rows = conn.execute(
             "SELECT DATE(timestamp) AS day, AVG(power) FROM readings "
-            "WHERE device='fase1' AND power IS NOT NULL GROUP BY day"
+            "WHERE device='fase1' AND timestamp>=? AND timestamp<? AND power IS NOT NULL "
+            "GROUP BY day",
+            (start_day, tomorrow),
         ).fetchall()
         avg_p_by_day = {r[0]: round(r[1], 1) for r in avg_p_rows} if avg_p_rows else {}
 
         # Get last N days, fill missing with 0, compute from readings when missing
         result = []
-        today = datetime.now().date()
         sorted_days = [(today - timedelta(days=d)).strftime("%Y-%m-%d") for d in range(days - 1, -1, -1)]
 
-        for day in sorted_days:
+        for i, day in enumerate(sorted_days):
             f1 = f1_daily.get(day, 0)
             br = br_daily.get(day, 0)
 
-            # If no snapshot for this day, compute directly from power readings
+            next_day = sorted_days[i + 1] if i + 1 < len(sorted_days) else tomorrow
+
+            # If no snapshot for this day, compute directly in SQL
             # so daily stays in sync with the hourly chart.
             if f1 == 0:
-                p_rows = conn.execute(
-                    "SELECT timestamp, power FROM readings "
-                    "WHERE device='fase1' AND DATE(timestamp)=? AND power IS NOT NULL "
-                    "ORDER BY timestamp",
-                    (day,),
-                ).fetchall()
-                if p_rows:
-                    f1 = round(_kwh_from_power_integral(p_rows), 4)
+                f1 = _sql_kwh(conn, "power", day, next_day)
 
             # Same fallback for the breaker (car) — phase_c stores breaker power.
             # Snapshots only exist after day rollover, so the current day would
             # otherwise show 0 for the car even while it's charging.
             if br == 0:
-                br_rows = conn.execute(
-                    "SELECT timestamp, phase_c FROM readings "
-                    "WHERE device='fase1' AND DATE(timestamp)=? AND phase_c IS NOT NULL "
-                    "ORDER BY timestamp",
-                    (day,),
-                ).fetchall()
-                if br_rows:
-                    br = round(_kwh_from_power_integral(br_rows), 4)
+                br = _sql_kwh(conn, "phase_c", day, next_day)
 
             result.append(
                 {
@@ -1200,40 +1205,56 @@ def db_daily_history(days=30):
 
 
 def db_hourly(date=None):
-    """Return hourly consumption from local readings using power×time integration."""
+    """Return hourly consumption from local readings using power×time integration.
+
+    Single SQL query (LAG window per hour) instead of streaming all of the
+    day's readings into Python.
+    """
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
+    next_day = (datetime.fromisoformat(date) + timedelta(days=1)).strftime("%Y-%m-%d")
 
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT timestamp, power FROM readings WHERE device='fase1' AND DATE(timestamp)=? AND power IS NOT NULL ORDER BY timestamp",
-            (date,),
+            """
+            WITH p AS (
+                SELECT strftime('%H', timestamp) AS hh,
+                       power AS w,
+                       LAG(power) OVER (
+                           PARTITION BY strftime('%H', timestamp) ORDER BY timestamp
+                       ) AS prev_w,
+                       (julianday(timestamp) - LAG(julianday(timestamp)) OVER (
+                           PARTITION BY strftime('%H', timestamp) ORDER BY timestamp
+                       )) * 86400.0 AS dt_s
+                FROM readings
+                WHERE device='fase1' AND timestamp >= ? AND timestamp < ? AND power IS NOT NULL
+            )
+            SELECT hh, COUNT(*), AVG(w),
+                   SUM(CASE WHEN dt_s > 0 AND dt_s < 120
+                            THEN (prev_w + w) / 2000.0 * (dt_s / 3600.0) END)
+            FROM p GROUP BY hh ORDER BY hh
+            """,
+            (date, next_day),
         ).fetchall()
 
         if not rows:
             return {"date": date, "hours": [], "total_kwh": 0, "source": "local"}
 
-        # Group timestamps+power by hour for proper integration
-        hourly_data = defaultdict(list)
-        for ts, power in rows:
-            hour = datetime.fromisoformat(ts).strftime("%H")
-            hourly_data[hour].append((ts, power or 0))
+        by_hour = {r[0]: r for r in rows}
 
         # Build array of 24 hour entries (frontend expects an array, not a dict)
         hours = []
         total_kwh = 0.0
         for h in range(24):
             hh = f"{h:02d}"
-            if hh in hourly_data and len(hourly_data[hh]) > 1:
-                pts = hourly_data[hh]
-                kwh = round(_kwh_from_power_integral(pts), 4)
-                avg_power = sum(p for _, p in pts) / len(pts)
-                cnt = len(pts)
+            r = by_hour.get(hh)
+            if r and r[1]:
+                cnt = r[1]
+                avg_power = r[2] or 0
+                kwh = round(r[3], 4) if cnt > 1 and r[3] is not None else 0
             else:
-                cnt = len(hourly_data.get(hh, []))
-                avg_power = hourly_data[hh][0][1] if cnt > 0 else 0
-                kwh = 0
+                cnt, avg_power, kwh = 0, 0, 0
             total_kwh += kwh
             hours.append(
                 {
@@ -1965,13 +1986,22 @@ def api_today():
 
 @app.get("/api/daily-history")
 def api_daily_history(days: int = 30):
-    return {"days": db_daily_history(days)}
+    days = max(1, min(days, 365))
+    key = ("daily_history", days)
+    cached = _ttl_get(key, 45)
+    if cached is not None:
+        return {"days": cached}
+    result = db_daily_history(days)
+    _ttl_put(key, result)
+    return {"days": result}
 
 
 def db_monthly_stats(year: int, month: int):
     """Return monthly aggregated stats: total kWh, cost, daily breakdown.
 
-    Uses POWER × TIME integration (same as db_today_stats), not energy counter delta.
+    Uses POWER × TIME integration (same as db_today_stats), not energy counter
+    delta. Single SQL query with per-day LAG windows returns ≤31 rows instead
+    of streaming the whole month's readings into Python.
     """
     cfg = load_config()
     cost = cfg.get("kwh_cost", 0.956)
@@ -1982,43 +2012,37 @@ def db_monthly_stats(year: int, month: int):
         last = f"{year:04d}-{month + 1:02d}-01"
     conn = get_db()
     try:
-        # Get all readings with power for the month, ordered by time
         rows = conn.execute(
-            """SELECT DATE(timestamp) AS day, timestamp, power
-               FROM readings
-               WHERE device = 'fase1' AND timestamp >= ? AND timestamp < ?
-                 AND power IS NOT NULL
-               ORDER BY timestamp""",
+            """
+            WITH p AS (
+                SELECT DATE(timestamp) AS day,
+                       power AS w,
+                       LAG(power) OVER (PARTITION BY DATE(timestamp) ORDER BY timestamp) AS prev_w,
+                       (julianday(timestamp) - LAG(julianday(timestamp)) OVER (
+                           PARTITION BY DATE(timestamp) ORDER BY timestamp
+                       )) * 86400.0 AS dt_s
+                FROM readings
+                WHERE device='fase1' AND timestamp >= ? AND timestamp < ? AND power IS NOT NULL
+            )
+            SELECT day,
+                   COALESCE(ROUND(SUM(CASE WHEN dt_s > 0 AND dt_s < 120
+                                           THEN (prev_w + w) / 2000.0 * (dt_s / 3600.0)
+                                           END), 4), 0) AS kwh
+            FROM p GROUP BY day ORDER BY day
+            """,
             (first, last),
         ).fetchall()
 
-        # Group by day for per-day integration
-        from collections import defaultdict
-        by_day = defaultdict(list)
-        for day, ts, p in rows:
-            by_day[day].append((ts, p or 0))
-
-        daily = []
-        total_kwh = 0.0
-        for day in sorted(by_day.keys()):
-            pts = by_day[day]
-            if len(pts) > 1:
-                kwh = round(_kwh_from_power_integral(pts), 4)
-            else:
-                kwh = 0
-            total_kwh += kwh
-            daily.append(
-                {
-                    "day": day,
-                    "kwh": kwh,
-                    "cost": round(kwh * cost, 2),
-                }
-            )
+        daily = [
+            {"day": day, "kwh": kwh, "cost": round(kwh * cost, 2)}
+            for day, kwh in rows
+        ]
+        total_kwh = round(sum(d["kwh"] for d in daily), 4)
 
         return {
             "year": year,
             "month": month,
-            "total_kwh": round(total_kwh, 4),
+            "total_kwh": total_kwh,
             "total_cost": round(total_kwh * cost, 2),
             "daily": daily,
             "source": "local",
@@ -2029,7 +2053,13 @@ def db_monthly_stats(year: int, month: int):
 
 @app.get("/api/monthly")
 def api_monthly(year: int, month: int):
-    return db_monthly_stats(year, month)
+    key = ("monthly", year, month)
+    cached = _ttl_get(key, 45)
+    if cached is not None:
+        return cached
+    result = db_monthly_stats(year, month)
+    _ttl_put(key, result)
+    return result
 
 
 @app.post("/api/cloud-sync")
@@ -2075,7 +2105,15 @@ def api_clear_db(before_days: int = 30):
 
 @app.get("/api/hourly")
 def api_hourly(date: str = None):
-    return db_hourly(date)
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    key = ("hourly", date)
+    cached = _ttl_get(key, 45)
+    if cached is not None:
+        return cached
+    result = db_hourly(date)
+    _ttl_put(key, result)
+    return result
 
 
 @app.post("/api/breaker/on")
