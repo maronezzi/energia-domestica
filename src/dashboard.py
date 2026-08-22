@@ -151,6 +151,39 @@ def _sql_kwh(conn, col: str, start: str, end: str, min_avg_w: float = 0.0) -> fl
     return round(row[0] or 0.0, 4)
 
 
+def _kwh_snapshots_plus_missing_days(conn, start: str, end: str) -> float:
+    """Month-to-date kWh from daily_snapshots, integrating ONLY days that lack
+    a snapshot (today-in-progress or rare gaps).
+
+    Snapshots are written once per day by poll_loop's rollover, so completed
+    days cost a single indexed lookup instead of a full re-integration — the
+    whole-month LAG scan took ~3.4 s on the CubieBoard; this takes ~10 ms.
+    """
+    snaps = {
+        d: (e or 0)
+        for d, e in conn.execute(
+            "SELECT snapshot_date, energy_kwh FROM daily_snapshots "
+            "WHERE device='fase1' AND snapshot_date>=? AND snapshot_date<?",
+            (start, end),
+        ).fetchall()
+    }
+    total = sum(snaps.values())
+    day = datetime.fromisoformat(start).date()
+    last = datetime.fromisoformat(end).date()
+    while day < last:
+        ds = day.strftime("%Y-%m-%d")
+        if ds not in snaps:
+            nd = (day + timedelta(days=1)).strftime("%Y-%m-%d")
+            has_readings = conn.execute(
+                "SELECT 1 FROM readings WHERE device='fase1' AND timestamp>=? AND timestamp<? LIMIT 1",
+                (ds, nd),
+            ).fetchone()
+            if has_readings:
+                total += _sql_kwh(conn, "power", ds, nd)
+        day += timedelta(days=1)
+    return round(total, 4)
+
+
 # ─── Charge history (for prediction improvement) ──────────────
 CHARGE_STATS_FILE = BASE_DIR / "data" / "charge_history.json"
 
@@ -242,6 +275,13 @@ def init_db():
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshot_date_dev ON daily_snapshots(snapshot_date, device)"
     )
+    # Migration v3: store per-day average power in the snapshot so history
+    # queries never need to rescan readings (CubieBoard has a slow CPU/SD).
+    cur_snap_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(daily_snapshots)").fetchall()
+    }
+    if "avg_power_w" not in cur_snap_cols:
+        conn.execute("ALTER TABLE daily_snapshots ADD COLUMN avg_power_w REAL")
     # ── Charge sessions (each car-charging session) ──
     conn.execute("""
         CREATE TABLE IF NOT EXISTS charge_sessions (
@@ -294,6 +334,21 @@ def init_db():
         if n_fixed:
             print(f"DB migration v2b: fixed {n_fixed} charge_sessions (÷100 for scaling)")
         save_config(_cfg)
+    # Backfill v3: preenche avg_power_w dos snapshots existentes (uma única vez).
+    if not _cfg.get("snapshots_avg_v1"):
+        rows = conn.execute(
+            "SELECT DATE(timestamp) AS day, AVG(power) FROM readings "
+            "WHERE device='fase1' AND timestamp>=? AND power IS NOT NULL GROUP BY day",
+            ((datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"),),
+        ).fetchall()
+        for day, avg_w in rows:
+            conn.execute(
+                "UPDATE daily_snapshots SET avg_power_w=? WHERE snapshot_date=? AND device='fase1'",
+                (round(avg_w, 1) if avg_w is not None else None, day),
+            )
+        _cfg["snapshots_avg_v1"] = True
+        save_config(_cfg)
+        print(f"DB migration v3: backfilled avg_power_w em {len(rows)} snapshots")
     conn.commit()
     conn.close()
 
@@ -1092,8 +1147,7 @@ def db_today_stats():
             (today, tomorrow),
         ).fetchone()[0]
 
-        # Month-to-date integral scans the whole month → recompute at most
-        # every 60 s (changes negligibly between polls).
+        # Month-to-date: snapshots-first (cheap); recompute at most every 60 s.
         mkey = ("month_kwh", month_start)
         month_kwh = _ttl_get(mkey, 60)
         if month_kwh is None:
@@ -1102,7 +1156,7 @@ def db_today_stats():
                 (month_start,),
             ).fetchone()
             if has_month:
-                month_kwh = _sql_kwh(conn, "power", month_start, tomorrow)
+                month_kwh = _kwh_snapshots_plus_missing_days(conn, month_start, tomorrow)
             else:
                 # No readings this month: fall back to daily snapshot sums.
                 row = conn.execute(
@@ -1144,31 +1198,36 @@ def db_daily_history(days=30):
 
         # Get snapshots within the window only
         snap_rows = conn.execute(
-            "SELECT snapshot_date, device, energy_kwh FROM daily_snapshots WHERE snapshot_date>=?",
+            "SELECT snapshot_date, device, energy_kwh, avg_power_w "
+            "FROM daily_snapshots WHERE snapshot_date>=?",
             (start_day,),
         ).fetchall()
 
         f1_daily = {}
         br_daily = {}
+        f1_avg = {}
         for row in snap_rows:
-            day, dev, energy = row
+            day, dev, energy, avg_w = row
             if dev == "fase1":
                 f1_daily[day] = energy
+                f1_avg[day] = round(avg_w, 1) if avg_w is not None else 0
             else:
                 br_daily[day] = energy
-
-        # Average power per day, bounded to the window (was: full-table GROUP BY)
-        avg_p_rows = conn.execute(
-            "SELECT DATE(timestamp) AS day, AVG(power) FROM readings "
-            "WHERE device='fase1' AND timestamp>=? AND timestamp<? AND power IS NOT NULL "
-            "GROUP BY day",
-            (start_day, tomorrow),
-        ).fetchall()
-        avg_p_by_day = {r[0]: round(r[1], 1) for r in avg_p_rows} if avg_p_rows else {}
 
         # Get last N days, fill missing with 0, compute from readings when missing
         result = []
         sorted_days = [(today - timedelta(days=d)).strftime("%Y-%m-%d") for d in range(days - 1, -1, -1)]
+
+        # Today has no snapshot yet (rollover closes it after midnight):
+        # average power comes from its own small range query.
+        today_avg = 0.0
+        if f1_daily.get(sorted_days[-1]) is None:
+            r = conn.execute(
+                "SELECT AVG(power) FROM readings WHERE device='fase1' "
+                "AND timestamp>=? AND timestamp<? AND power IS NOT NULL",
+                (sorted_days[-1], tomorrow),
+            ).fetchone()
+            today_avg = round(r[0], 1) if r and r[0] is not None else 0.0
 
         for i, day in enumerate(sorted_days):
             f1 = f1_daily.get(day, 0)
@@ -1195,7 +1254,7 @@ def db_daily_history(days=30):
                     "breaker_kwh": br,
                     "breaker_cost": round(br * cost, 2),
                     "cost": round(f1 * cost, 2),
-                    "avg_power_w": avg_p_by_day.get(day, 0),
+                    "avg_power_w": f1_avg.get(day) or (today_avg if day == sorted_days[-1] else 0),
                 }
             )
 
@@ -1920,12 +1979,19 @@ def poll_loop():
                         if br_power_rows
                         else 0
                     )
+                    f1_avg_w = (
+                        round(sum(p for _, p in f1_rows) / len(f1_rows), 1)
+                        if f1_rows
+                        else None
+                    )
                     if f1_kwh > 0:
                         conn.execute(
-                            """INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, created_at)
-                               VALUES (?, 'fase1', ?, ?)
-                               ON CONFLICT(snapshot_date, device) DO UPDATE SET energy_kwh = excluded.energy_kwh""",
-                            (closing_day, f1_kwh, datetime.now().isoformat()),
+                            """INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, avg_power_w, created_at)
+                               VALUES (?, 'fase1', ?, ?, ?, ?)
+                               ON CONFLICT(snapshot_date, device) DO UPDATE SET
+                                 energy_kwh = excluded.energy_kwh,
+                                 avg_power_w = excluded.avg_power_w""",
+                            (closing_day, f1_kwh, f1_avg_w, datetime.now().isoformat()),
                         )
                     if br_kwh > 0:
                         conn.execute(
@@ -1999,9 +2065,10 @@ def api_daily_history(days: int = 30):
 def db_monthly_stats(year: int, month: int):
     """Return monthly aggregated stats: total kWh, cost, daily breakdown.
 
-    Uses POWER × TIME integration (same as db_today_stats), not energy counter
-    delta. Single SQL query with per-day LAG windows returns ≤31 rows instead
-    of streaming the whole month's readings into Python.
+    Snapshots-first: per-day kWh comes from daily_snapshots (written at each
+    day rollover); only days without a snapshot (today / gaps) get integrated
+    via SQL. A full re-integration took ~3.4 s on the CubieBoard; this is
+    ~10 ms of lookups plus one single-day integral.
     """
     cfg = load_config()
     cost = cfg.get("kwh_cost", 0.956)
@@ -2012,31 +2079,34 @@ def db_monthly_stats(year: int, month: int):
         last = f"{year:04d}-{month + 1:02d}-01"
     conn = get_db()
     try:
-        rows = conn.execute(
-            """
-            WITH p AS (
-                SELECT DATE(timestamp) AS day,
-                       power AS w,
-                       LAG(power) OVER (PARTITION BY DATE(timestamp) ORDER BY timestamp) AS prev_w,
-                       (julianday(timestamp) - LAG(julianday(timestamp)) OVER (
-                           PARTITION BY DATE(timestamp) ORDER BY timestamp
-                       )) * 86400.0 AS dt_s
-                FROM readings
-                WHERE device='fase1' AND timestamp >= ? AND timestamp < ? AND power IS NOT NULL
-            )
-            SELECT day,
-                   COALESCE(ROUND(SUM(CASE WHEN dt_s > 0 AND dt_s < 120
-                                           THEN (prev_w + w) / 2000.0 * (dt_s / 3600.0)
-                                           END), 4), 0) AS kwh
-            FROM p GROUP BY day ORDER BY day
-            """,
-            (first, last),
-        ).fetchall()
+        by_day = dict(
+            conn.execute(
+                "SELECT snapshot_date, energy_kwh FROM daily_snapshots "
+                "WHERE device='fase1' AND snapshot_date>=? AND snapshot_date<?",
+                (first, last),
+            ).fetchall()
+        )
 
-        daily = [
-            {"day": day, "kwh": kwh, "cost": round(kwh * cost, 2)}
-            for day, kwh in rows
-        ]
+        daily = []
+        day = datetime.fromisoformat(first).date()
+        last_d = datetime.fromisoformat(last).date()
+        while day < last_d:
+            ds = day.strftime("%Y-%m-%d")
+            if ds in by_day and by_day[ds] is not None:
+                kwh = round(by_day[ds], 4)
+            else:
+                nd = (day + timedelta(days=1)).strftime("%Y-%m-%d")
+                has_readings = conn.execute(
+                    "SELECT 1 FROM readings WHERE device='fase1' AND timestamp>=? AND timestamp<? LIMIT 1",
+                    (ds, nd),
+                ).fetchone()
+                if not has_readings:
+                    day += timedelta(days=1)
+                    continue  # dia sem nenhum dado (futuro/mês incompleto)
+                kwh = _sql_kwh(conn, "power", ds, nd)
+            daily.append({"day": ds, "kwh": kwh, "cost": round(kwh * cost, 2)})
+            day += timedelta(days=1)
+
         total_kwh = round(sum(d["kwh"] for d in daily), 4)
 
         return {
