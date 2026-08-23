@@ -227,6 +227,34 @@ def get_avg_charge_rate() -> float:
     return cfg.get("car_charge_power_w", 2400) / 1000  # fallback: config power
 
 
+def _migrate_utc_to_brt(conn):
+    """One-time migration: board ran in UTC until 2026-08-22; all stored
+    timestamps are UTC. Shift readings/charge sessions to BRT (UTC-3, no DST
+    in Brazil) so day boundaries and hourly charts match local time, then
+    drop snapshots (computed on UTC-day windows) for rebuild by backfill.
+    Idempotent via config gate `tz_brt_migrated`.
+    """
+    _cfg = load_config()
+    if _cfg.get("tz_brt_migrated"):
+        return
+    n_read = conn.execute(
+        "UPDATE readings SET timestamp = strftime('%Y-%m-%dT%H:%M:%S', timestamp, '-3 hours')"
+    ).rowcount
+    n_sess = conn.execute(
+        "UPDATE charge_sessions SET "
+        "start_time = strftime('%Y-%m-%dT%H:%M:%S', start_time, '-3 hours'), "
+        "end_time = CASE WHEN end_time IS NULL THEN NULL "
+        "ELSE strftime('%Y-%m-%dT%H:%M:%S', end_time, '-3 hours') END"
+    ).rowcount
+    conn.execute("DELETE FROM daily_snapshots")
+    conn.commit()
+    _cfg["tz_brt_migrated"] = True
+    _cfg.pop("snapshots_backfilled", None)  # force snapshot rebuild (BRT days)
+    _cfg["last_snapshot_day"] = datetime.now().strftime("%Y-%m-%d")
+    save_config(_cfg)
+    print(f"DB migration tz: {n_read} leituras e {n_sess} sessões movidas UTC→BRT (-3h); snapshots serão reconstruídos")
+
+
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     # WAL: readers (dashboard) never block the writer (poll_loop inserts).
@@ -334,6 +362,8 @@ def init_db():
         if n_fixed:
             print(f"DB migration v2b: fixed {n_fixed} charge_sessions (÷100 for scaling)")
         save_config(_cfg)
+    # Migration tz: board ran in UTC — shift stored times to BRT (UTC-3).
+    _migrate_utc_to_brt(conn)
     # Backfill v3: preenche avg_power_w dos snapshots existentes (uma única vez).
     if not _cfg.get("snapshots_avg_v1"):
         rows = conn.execute(
@@ -633,6 +663,7 @@ def _backfill_snapshots_from_readings():
     Idempotent via gate `snapshots_backfilled` in config — runs once per install.
     On first run, replaces legacy placeholders (0.001) and cumulative-counter
     artifacts (>= 100 kWh/day on breaker) with real power×time integrals.
+    Also fills avg_power_w so history views never rescan readings.
     """
     _cfg = load_config()
     if _cfg.get("snapshots_backfilled"):
@@ -671,6 +702,11 @@ def _backfill_snapshots_from_readings():
                 if f1_by_day[day]
                 else 0
             )
+            f1_avg_w = (
+                round(sum(p for _, p in f1_by_day[day]) / len(f1_by_day[day]), 1)
+                if f1_by_day[day]
+                else None
+            )
             br_kwh = (
                 round(_kwh_from_power_integral(br_power_by_day[day]), 4)
                 if br_power_by_day[day]
@@ -689,13 +725,13 @@ def _backfill_snapshots_from_readings():
                 if is_placeholder:
                     if existing is None:
                         conn.execute(
-                            "INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, created_at) VALUES (?, 'fase1', ?, ?)",
-                            (day, f1_kwh, datetime.now().isoformat()),
+                            "INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, avg_power_w, created_at) VALUES (?, 'fase1', ?, ?, ?)",
+                            (day, f1_kwh, f1_avg_w, datetime.now().isoformat()),
                         )
                     else:
                         conn.execute(
-                            "UPDATE daily_snapshots SET energy_kwh=?, created_at=? WHERE snapshot_date=? AND device='fase1'",
-                            (f1_kwh, datetime.now().isoformat(), day),
+                            "UPDATE daily_snapshots SET energy_kwh=?, avg_power_w=?, created_at=? WHERE snapshot_date=? AND device='fase1'",
+                            (f1_kwh, f1_avg_w, datetime.now().isoformat(), day),
                         )
                 n_f1 += 1
 
