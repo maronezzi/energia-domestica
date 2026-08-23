@@ -695,11 +695,11 @@ function initCharts() {
     });
     cDaily = new Chart(document.getElementById('chartDaily'), {
         type:'bar', data:{labels:[], datasets:[{label:'kWh', data:[], backgroundColor:'rgba(0,212,170,.6)', borderColor:'#00d4aa', borderWidth:1, borderRadius:4}]},
-        options:{...base, scales:{...base.scales, x:{...base.scales.x, ticks:{...base.scales.x.ticks, maxTicksLimit:15}}}}
+        options:{...base, scales:{...base.scales, x:{...base.scales.x, ticks:{...base.scales.x.ticks, maxTicksLimit:15}}, y:{...base.scales.y, beginAtZero:true, bounds:'ticks'}}}
     });
     cHourly = new Chart(document.getElementById('chartHourly'), {
         type:'bar', data:{labels:[], datasets:[{label:'kWh', data:[], backgroundColor:'rgba(59,130,246,.6)', borderColor:'#3b82f6', borderWidth:1, borderRadius:3}]},
-        options:{...base, scales:{...base.scales, x:{...base.scales.x, ticks:{...base.scales.x.ticks, maxTicksLimit:24}}}}
+        options:{...base, scales:{...base.scales, x:{...base.scales.x, ticks:{...base.scales.x.ticks, maxTicksLimit:24}}, y:{...base.scales.y, beginAtZero:true, bounds:'ticks'}}}
     });
     const di = document.getElementById('hourlyDate');
     if (di) { di.value = new Date().toISOString().split('T')[0]; di.max = di.value; }
