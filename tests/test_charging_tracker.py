@@ -120,6 +120,36 @@ class TestChargingTracker(unittest.TestCase):
         self.assertEqual(t.state, t.STATE_IDLE)
         self.assertIsNone(t.session_uuid)
 
+    def test_stop_auto_returns_to_idle(self):
+        """Regressão: stop(reason='auto') deixava state='done' e a
+        auto-detecção do poll_loop (que só dispara a partir de IDLE) nunca
+        mais criava sessão — o próximo carregamento manual ficava sem
+        registro no DB até restart do serviço."""
+        t = self._new_tracker()
+        t.start(50, 80, 12.9, 10.0, session_uuid="abc-123")
+        t.stop(reason="auto")
+        self.assertEqual(t.state, t.STATE_IDLE)
+
+    def test_apply_soc_correction_rebases_mid_session(self):
+        """Correção de SOC durante a carga: effective_soc passa a ser o valor
+        informado e a inclinação por energia é preservada (start_soc rebase)."""
+        t = self._new_tracker()
+        t.start(50, 80, 12.9, 10.0)
+        # 1.0 kWh entregue a 100% eficiência => +7.75% → effective_soc 57.75
+        t.update(11.0, 2000, 15, 120, efficiency=1.0)
+        self.assertAlmostEqual(t.effective_soc, 57.75, places=2)
+        rebased = t.apply_soc_correction(30.0)
+        self.assertAlmostEqual(t.effective_soc, 30.0, places=2)
+        # start_soc rebaseado: 30 - 7.75 = 22.25
+        self.assertAlmostEqual(rebased, 22.25, places=2)
+        # Mais 1.0 kWh → +7.75% sobre o novo start_soc
+        t.update(12.0, 2000, 15, 120, efficiency=1.0)
+        self.assertAlmostEqual(t.effective_soc, 37.75, places=2)
+
+    def test_apply_soc_correction_ignored_when_idle(self):
+        t = self._new_tracker()
+        self.assertIsNone(t.apply_soc_correction(30.0))
+
     def test_no_prediction_when_not_charging(self):
         """estimated_remaining_minutes must be None when the car draws 0W."""
         t = self._new_tracker()
@@ -198,15 +228,140 @@ class TestChargeSessionDB(unittest.TestCase):
         import dashboard
         # Redirect to temp DB for this test
         self._orig_db = dashboard.DB_FILE
+        self._orig_cfg = dashboard.CONFIG_FILE
         dashboard.DB_FILE = Path(_tmpdir) / "data" / "tuya_history.db"
+        dashboard.CONFIG_FILE = Path(_tmpdir) / "data" / "tuya_config.json"
         # Start with a clean DB for each test
         if dashboard.DB_FILE.exists():
             dashboard.DB_FILE.unlink()
+        # ...e config limpa (o gate do backfill persiste no arquivo entre tests)
+        if dashboard.CONFIG_FILE.exists():
+            dashboard.CONFIG_FILE.unlink()
         dashboard.init_db()
+        dashboard._cfg_cache = None
 
     def tearDown(self):
         import dashboard
         dashboard.DB_FILE = self._orig_db
+        dashboard.CONFIG_FILE = self._orig_cfg
+        dashboard._cfg_cache = None
+
+    @staticmethod
+    def _insert_charge_readings(conn, start_dt, minutes, watts, step_s=30,
+                                start_counter=740.0, counter_ratio=1.0):
+        """Insere leituras fase1 (phase_c=power_w, breaker_energy=kWh) como se
+        o carro estivesse carregando. counter_ratio<1 simula contador falhando
+        (delta menor que a integral). Retorna o contador final."""
+        import dashboard
+        from datetime import timedelta
+        e = start_counter
+        t = start_dt
+        for _ in range(int(minutes * 60 / step_s)):
+            conn.execute(
+                "INSERT INTO readings (timestamp, device, phase_c, breaker_energy)"
+                " VALUES (?, 'fase1', ?, ?)",
+                (t.isoformat(), watts, e),
+            )
+            e += watts * step_s / 3600.0 / 1000.0 * counter_ratio
+            t += timedelta(seconds=step_s)
+        conn.commit()
+        return e
+
+    def test_detect_windows_bridges_short_gaps(self):
+        from dashboard import _detect_charge_windows
+        T = datetime.datetime
+        rows = [
+            ("2020-01-01T10:00:00", 2700), ("2020-01-01T10:00:30", 2700),
+            # pausa de 5 min (estimador de potencia zera por instantes)
+            ("2020-01-01T10:05:30", 2700), ("2020-01-01T10:06:00", 2700),
+        ]
+        w = _detect_charge_windows(rows, bridge_gap_s=900)
+        self.assertEqual(len(w), 1)  # 5min < bridge → uma janela só
+        rows_far = rows + [("2020-01-01T10:40:00", 2700)]
+        w2 = _detect_charge_windows(rows_far, bridge_gap_s=900)
+        self.assertEqual(len(w2), 2)  # 34min > bridge → duas janelas
+
+    def test_backfill_recovers_untracked_charging(self):
+        """Dias com carga medida mas sem sessão (bug de auto-detecção antigo)
+        ganham sessão 'reconstructed' com kWh/duração/custo — sem duplicar
+        sessões que já existem."""
+        import dashboard
+        from dashboard import backfill_charge_sessions_from_readings
+        conn = dashboard.get_db()
+        try:
+            # Janela A: 2h @2700W ≈ 5.4 kWh — sem sessão → recupera
+            self._insert_charge_readings(
+                conn, datetime.datetime(2020, 1, 1, 10, 0), 120, 2700)
+            # Blip mínimo (~0.01 kWh) — abaixo de 0.05 → ignora
+            self._insert_charge_readings(
+                conn, datetime.datetime(2020, 1, 1, 13, 0), 1, 2700,
+                start_counter=800.0)
+            # Janela C: sobrepõe sessão JÁ registrada → não duplica
+            conn.execute(
+                "INSERT INTO charge_sessions"
+                " (session_uuid, start_time, end_time, status,"
+                "  start_energy_kwh, cost_per_kwh)"
+                " VALUES ('existente', '2020-01-02T10:00:00',"
+                "         '2020-01-02T11:00:00', 'completed', 900, 0.956)")
+            self._insert_charge_readings(
+                conn, datetime.datetime(2020, 1, 2, 10, 30), 60, 2700,
+                start_counter=900.0)
+        finally:
+            conn.close()
+
+        created = backfill_charge_sessions_from_readings()
+        self.assertEqual(created, 1)
+        rows = [
+            s for s in dashboard.list_charge_sessions(limit=50)
+            if s["status"] == "reconstructed"
+        ]
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertAlmostEqual(r["energy_delivered_kwh"], 5.4, delta=0.05)
+        self.assertGreaterEqual(r["duration_seconds"], 7000)
+        self.assertAlmostEqual(r["avg_power_w"], 2700, delta=60)
+        self.assertAlmostEqual(r["total_cost"], 5.4 * 0.956, delta=0.1)
+        self.assertIsNone(r["soc_start"])  # SOC histórico é desconhecido
+        # Sessão existente continua intacta
+        kept = [
+            s for s in dashboard.list_charge_sessions(limit=50)
+            if s["session_uuid"] == "existente"
+        ]
+        self.assertEqual(len(kept), 1)
+
+    def test_backfill_is_one_shot(self):
+        import dashboard
+        from dashboard import backfill_charge_sessions_from_readings
+        conn = dashboard.get_db()
+        try:
+            self._insert_charge_readings(
+                conn, datetime.datetime(2020, 1, 1, 10, 0), 60, 2700)
+        finally:
+            conn.close()
+        self.assertEqual(backfill_charge_sessions_from_readings(), 1)
+        # Segunda execução: gate em config → não duplica
+        self.assertEqual(backfill_charge_sessions_from_readings(), 0)
+
+    def test_backfill_falls_back_to_integral_when_counter_stuck(self):
+        """Energia prefere o delta do contador DPS 1; com contador preso
+        (delta=0) cai na integral de potência×tempo."""
+        import dashboard
+        from dashboard import backfill_charge_sessions_from_readings
+        conn = dashboard.get_db()
+        try:
+            # counter_ratio=0 → breaker_energy constante → delta=0 → inviável
+            self._insert_charge_readings(
+                conn, datetime.datetime(2020, 1, 1, 10, 0), 60, 2700,
+                counter_ratio=0.0)
+        finally:
+            conn.close()
+        backfill_charge_sessions_from_readings()
+        r = [
+            s for s in dashboard.list_charge_sessions(limit=50)
+            if s["status"] == "reconstructed"
+        ][0]
+        self.assertAlmostEqual(r["energy_delivered_kwh"], 2.7, delta=0.05)
+        self.assertIsNone(r["start_energy_kwh"])  # fallback não tem contadores
 
     def test_create_and_finalize_session(self):
         from dashboard import create_charge_session, finalize_charge_session, list_charge_sessions
@@ -323,6 +478,99 @@ class TestChargeSessionDB(unittest.TestCase):
         self.assertEqual(len(actives), 1)
         self.assertEqual(actives[0]["session_uuid"], keep)
 
+    def test_finalize_auto_reconciles_soc_start(self):
+        """Sessão terminada pelo CARRO (end_reason='auto', soc_end=100):
+        o soc_start verdadeiro é retrocalculado de 100 − energia×eficiência÷
+        bateria — a estimativa carregada no início satura antes do fim real."""
+        from dashboard import (
+            create_charge_session,
+            finalize_charge_session,
+            list_charge_sessions,
+        )
+        s = create_charge_session(
+            soc_start=73.38, soc_target=100, battery_kwh=12.9,
+            start_energy_kwh=100.0, cost_per_kwh=1.0,
+        )
+        finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=110.4,
+            soc_end=100.0, end_reason="auto",
+        )
+        row = [
+            x for x in list_charge_sessions(limit=10)
+            if x["session_uuid"] == s["session_uuid"]
+        ][0]
+        self.assertAlmostEqual(row["energy_delivered_kwh"], 10.4, places=2)
+        self.assertAlmostEqual(
+            row["soc_start"], 100.0 - (10.4 * 0.85 / 12.9 * 100), places=1
+        )
+
+    def test_finalize_manual_keeps_soc_start(self):
+        """Fim manual (disjuntor desligado antes do carro encher) NÃO reconcilia
+        — o soc_end ali é estimativa, não o 100% real da bateria."""
+        from dashboard import (
+            create_charge_session,
+            finalize_charge_session,
+            list_charge_sessions,
+        )
+        s = create_charge_session(
+            soc_start=40.0, soc_target=80, battery_kwh=12.9,
+            start_energy_kwh=100.0, cost_per_kwh=1.0,
+        )
+        finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=105.0,
+            soc_end=72.9, end_reason="manual",
+        )
+        row = [
+            x for x in list_charge_sessions(limit=10)
+            if x["session_uuid"] == s["session_uuid"]
+        ][0]
+        self.assertAlmostEqual(row["soc_start"], 40.0, places=1)
+
+    def test_estimate_soc_start_uses_reconciled_plugin_soc(self):
+        """Ciclo de aprendizado: sessão anterior terminou com o carro CHEIO
+        (auto, soc_end=100) e o soc_start reconciliado dela é o melhor
+        estimador para a próxima plugada — NÃO o soc_end=100, que satura."""
+        from dashboard import estimate_car_soc_start
+        import dashboard as _d
+        conn = _d.get_db()
+        try:
+            conn.execute(
+                "INSERT INTO charge_sessions"
+                " (session_uuid, start_time, end_time, status, soc_start, soc_end,"
+                "  energy_delivered_kwh, end_reason)"
+                " VALUES ('aprendida', '2020-01-03T08:00:00', '2020-01-03T12:00:00',"
+                "         'auto_stopped', 31.47, 100.0, 10.4, 'auto')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        soc, estimated = estimate_car_soc_start({"car_current_soc": 100})
+        self.assertTrue(estimated)
+        self.assertAlmostEqual(soc, 31, places=1)  # campo inteiro: piso
+
+    def test_finalize_auto_syncs_car_current_soc(self):
+        """No fim reconciliado, o campo 'SOC Atual do Carro' (config) recebe o
+        SOC aprendido, semeando a próxima carga."""
+        import dashboard
+        from dashboard import (
+            create_charge_session,
+            finalize_charge_session,
+            load_config,
+        )
+        s = create_charge_session(
+            soc_start=73.38, soc_target=100, battery_kwh=12.9,
+            start_energy_kwh=100.0, cost_per_kwh=1.0,
+        )
+        finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=110.4,
+            soc_end=100.0, end_reason="auto",
+        )
+        self.assertAlmostEqual(
+            load_config()["car_current_soc"],
+            31,  # campo inteiro: piso do reconciliado
+            places=1,
+        )
+
     def test_list_charge_sessions_active_sorted_first(self):
         """`list_charge_sessions(include_active=True)` must surface the active
         session first even when finished sessions are newer in start_time
@@ -342,6 +590,79 @@ class TestChargeSessionDB(unittest.TestCase):
         rows = list_charge_sessions(limit=50, include_active=True)
         self.assertEqual(rows[0]["session_uuid"], active["session_uuid"])
         self.assertEqual(rows[0]["status"], "active")
+
+    def test_estimate_soc_start_from_last_session(self):
+        """SOC inicial estimado = soc_end da última sessão (fluxo manual sem
+        input do usuário)."""
+        from dashboard import (
+            create_charge_session,
+            estimate_car_soc_start,
+            finalize_charge_session,
+        )
+        s = create_charge_session(40, 80, 12.9, 10.0, 0.956)
+        finalize_charge_session(s["session_uuid"], 13.0, 72.5, "auto")
+        soc, estimated = estimate_car_soc_start({"car_current_soc": 50})
+        self.assertTrue(estimated)
+        self.assertAlmostEqual(soc, 72, places=1)  # campo inteiro: piso
+
+    def test_estimate_soc_start_explicit_input_wins(self):
+        """SOC informado explicitamente APÓS a última sessão tem precedência
+        sobre a estimativa (ex.: usuário dirigiu e sabe o SOC real)."""
+        from dashboard import (
+            create_charge_session,
+            estimate_car_soc_start,
+            finalize_charge_session,
+        )
+        s = create_charge_session(40, 80, 12.9, 10.0, 0.956)
+        finalize_charge_session(s["session_uuid"], 13.0, 72.5, "auto")
+        soc, estimated = estimate_car_soc_start({
+            "car_current_soc": 35.0,
+            "car_current_soc_ts": datetime.datetime.now().isoformat(),
+        })
+        self.assertFalse(estimated)
+        self.assertAlmostEqual(soc, 35.0, places=1)
+
+    def test_estimate_soc_start_stale_config_loses_to_session(self):
+        """car_current_soc sem timestamp (ou anterior à última sessão) NÃO
+        conta como input explícito — usa a estimativa da sessão."""
+        from dashboard import (
+            create_charge_session,
+            estimate_car_soc_start,
+            finalize_charge_session,
+        )
+        s = create_charge_session(40, 80, 12.9, 10.0, 0.956)
+        finalize_charge_session(
+            s["session_uuid"], 13.0, 72.5, "auto"
+        )
+        soc, estimated = estimate_car_soc_start({
+            "car_current_soc": 35.0,
+            "car_current_soc_ts": "2020-01-01T00:00:00",
+        })
+        self.assertTrue(estimated)
+        self.assertAlmostEqual(soc, 72, places=1)  # campo inteiro: piso
+
+    def test_estimate_soc_start_no_history_falls_back_to_config(self):
+        from dashboard import estimate_car_soc_start
+        soc, estimated = estimate_car_soc_start({"car_current_soc": 66})
+        self.assertFalse(estimated)
+        self.assertAlmostEqual(soc, 66.0, places=1)
+
+    def test_estimate_soc_start_ignores_active_and_no_charge(self):
+        """Sessões 'active' (fantasma) e 'no_charge' (sem energia) não geram
+        estimativa — usa a última sessão REAL finalizada."""
+        from dashboard import (
+            create_charge_session,
+            estimate_car_soc_start,
+            finalize_charge_session,
+        )
+        real = create_charge_session(40, 80, 12.9, 10.0, 0.956)
+        finalize_charge_session(real["session_uuid"], 13.0, 72.5, "auto")
+        # no_charge mais recente não deve valer como estimativa
+        phantom = create_charge_session(99, 80, 12.9, 200.0, 0.956)
+        finalize_charge_session(phantom["session_uuid"], 200.0, 99.0, "manual")
+        soc, estimated = estimate_car_soc_start({"car_current_soc": 50})
+        self.assertTrue(estimated)
+        self.assertAlmostEqual(soc, 72, places=1)  # campo inteiro: piso
 
 
 class TestBreakerIdleWatchdog(unittest.TestCase):

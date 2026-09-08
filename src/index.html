@@ -169,6 +169,7 @@
         .data-table .status-badge.auto_stopped{background:rgba(59,130,246,.15);color:var(--accent2)}
         .data-table .status-badge.aborted{background:rgba(239,68,68,.15);color:var(--danger)}
         .data-table .status-badge.no_charge{background:rgba(255,255,255,.08);color:var(--dim)}
+        .data-table .status-badge.reconstructed{background:rgba(168,85,247,.15);color:#a855f7}
         .data-table .status-badge.active{background:rgba(245,158,11,.15);color:var(--warn)}
         .table-wrap{overflow-x:auto;border-radius:8px;border:1px solid var(--border)}
         
@@ -217,8 +218,6 @@
         .month-nav button{background:var(--card);border:1px solid var(--border);color:var(--text);padding:.5rem .8rem;border-radius:8px;cursor:pointer;font-size:.9rem}
         .month-nav button:hover{border-color:var(--accent)}
         .month-display{font-size:1.1rem;font-weight:600;padding:0 1rem;min-width:180px;text-align:center}
-        .admin-btns{display:flex;gap:.5rem;margin-left:auto}
-        .admin-btns button{padding:.5rem 1rem;border-radius:8px;cursor:pointer;font-size:.85rem}
 
         .summary{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
         .sum-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.2rem;text-align:center}
@@ -537,10 +536,6 @@
         <div class="month-nav"><button onclick="chgMonth(-1)">◀</button></div>
         <div class="month-display" id="monthDisp">—</div>
         <div class="month-nav"><button onclick="chgMonth(1)">▶</button><button onclick="goToday()" style="margin-left:.3rem">Hoje</button></div>
-        <div class="admin-btns">
-            <button onclick="syncCloud()" style="background:var(--card);border:1px solid var(--accent2);color:var(--accent2)">☁️ Sync</button>
-            <button onclick="clearDb()" style="background:rgba(239,68,68,.1);border:1px solid var(--danger);color:var(--danger)">🗑️ Limpar</button>
-        </div>
     </div>
 
     <div class="summary">
@@ -573,7 +568,7 @@
     <!-- Table -->
     <div class="table-card">
         <h3>📅 Detalhamento Diário</h3>
-        <table><thead><tr><th>Dia</th><th class="num">kWh Total</th><th class="num">Custo</th><th class="num">Carro kWh</th><th class="num">Carro R$</th><th class="num">Média W</th></tr></thead>
+        <table><thead><tr><th>Dia</th><th class="num">Casa kWh</th><th class="num">Casa R$</th><th class="num">Carro kWh</th><th class="num">Carro R$</th><th class="num">Casa W (média)</th></tr></thead>
         <tbody id="dailyTbody"><tr><td colspan="6" style="text-align:center;color:var(--dim);padding:2rem">Carregando...</td></tr></tbody></table>
     </div>
 </div>
@@ -695,14 +690,19 @@ function initCharts() {
     });
     cDaily = new Chart(document.getElementById('chartDaily'), {
         type:'bar', data:{labels:[], datasets:[{label:'kWh', data:[], backgroundColor:'rgba(0,212,170,.6)', borderColor:'#00d4aa', borderWidth:1, borderRadius:4}]},
-        options:{...base, scales:{...base.scales, x:{...base.scales.x, ticks:{...base.scales.x.ticks, maxTicksLimit:15}}, y:{...base.scales.y, beginAtZero:true, bounds:'ticks'}}}
+        options:{...base, scales:{...base.scales, x:{...base.scales.x, offset:true, ticks:{...base.scales.x.ticks, maxTicksLimit:15}}, y:{...base.scales.y, beginAtZero:true, bounds:'ticks'}}}
     });
     cHourly = new Chart(document.getElementById('chartHourly'), {
         type:'bar', data:{labels:[], datasets:[{label:'kWh', data:[], backgroundColor:'rgba(59,130,246,.6)', borderColor:'#3b82f6', borderWidth:1, borderRadius:3}]},
-        options:{...base, scales:{...base.scales, x:{...base.scales.x, ticks:{...base.scales.x.ticks, maxTicksLimit:24}}, y:{...base.scales.y, beginAtZero:true, bounds:'ticks'}}}
+        options:{...base, scales:{...base.scales, x:{...base.scales.x, offset:true, ticks:{...base.scales.x.ticks, maxTicksLimit:24}}, y:{...base.scales.y, beginAtZero:true, bounds:'ticks'}}}
     });
     const di = document.getElementById('hourlyDate');
-    if (di) { di.value = new Date().toISOString().split('T')[0]; di.max = di.value; }
+    if (di) {
+        // Data LOCAL do navegador (toISOString seria UTC — errava o dia após 21h BRT)
+        const n = new Date();
+        const local = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+        di.value = local; di.max = local;
+    }
 }
 
 const MAX_PTS = 100;
@@ -780,6 +780,7 @@ function updateUI(data) {
     const target = cfg.car_target_soc ?? 80;
     const batt = cfg.car_battery_kwh ?? 12.9;
     const power = cfg.car_charge_power_w ?? 2400;
+    carEff = cfg.car_charge_efficiency ?? 0.85;
     const isCharging = isOn;
 
     // Use effective SOC from charge tracker when charging, manual SOC otherwise
@@ -880,6 +881,7 @@ let timerInterval = null;
 let chargeStartKwh = null;
 let chargeStartTime = null;
 let lastCharge = null;
+let carEff = 0.85;  // grid→battery efficiency (config), p/ previsões no cliente
 
 async function refreshChargeState() {
     try {
@@ -921,11 +923,14 @@ function updateChargeSession(c) {
     const timer = document.getElementById('chargeTimer');
     const disp = document.getElementById('timerDisplay');
     if (timer && disp) {
-        if (c.target_reached) {
+        if (c.state === 'completing') {
+            // Carro parou de consumir — "pronto" só quando o disjuntor desligar
             timer.style.display = 'block';
-            disp.textContent = '✅ PRONTO';
+            timer.classList.remove('done');
+            disp.textContent = '⏹ FINALIZANDO';
         } else if (c.estimated_remaining_minutes != null && c.estimated_remaining_minutes > 0) {
             timer.style.display = 'block';
+            timer.classList.remove('done');
             const m = Math.round(c.estimated_remaining_minutes);
             const th = Math.floor(m / 60);
             const tm = m % 60;
@@ -938,7 +943,7 @@ function updateChargeSession(c) {
     // Idle progress
     if (c.state === 'completing' && c.idle_seconds !== undefined && idleProg) {
         idleProg.style.display = 'block';
-        const IDLE_NEEDED = 120;
+        const IDLE_NEEDED = c.idle_seconds_needed || 120;
         const remaining = Math.max(0, IDLE_NEEDED - c.idle_seconds);
         document.getElementById('csIdleCountdown').textContent = remaining;
         document.getElementById('csIdleFill').style.width = Math.min(100, (c.idle_seconds / IDLE_NEEDED) * 100) + '%';
@@ -965,52 +970,56 @@ function updateTimer(isCharging, powerW, targetPower, targetSoc, currentSoc, bat
     const disp = document.getElementById('timerDisplay');
     if (!timer || !disp) return;
 
-    if (currentSoc >= targetSoc) {
-        // Já atingiu a meta
-        timer.style.display = 'block';
-        timer.classList.add('done');
-        disp.textContent = '✅ COMPLETO';
-        return;
-    }
+    const c = lastCharge || {};
 
-    if (!isCharging || powerW < 10) {
-        // Não está carregando: mostra projeção baseada em config
-        timer.style.display = 'block';
-        timer.classList.remove('done');
-        const needKwh = Math.max(0, (targetSoc - currentSoc) / 100 * batteryKwh);
-        const hours = needKwh / Math.max(0.1, targetPower / 1000);
-        const minsLeft = Math.max(0, Math.round(hours * 60));
-        const h = Math.floor(minsLeft / 60);
-        const m = minsLeft % 60;
-        if (h > 0) disp.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
-        else disp.textContent = `${m}min`;
+    if (!isCharging) {
+        // Disjuntor desligado — sem "COMPLETO" por estimativa de SOC:
+        // mostra só a projeção para a meta quando falta carga.
+        if (currentSoc < targetSoc) {
+            timer.style.display = 'block';
+            timer.classList.remove('done');
+            const needKwh = Math.max(0, (targetSoc - currentSoc) / 100 * batteryKwh);
+            const hours = needKwh / Math.max(0.1, (targetPower / 1000) * carEff);
+            const minsLeft = Math.max(0, Math.round(hours * 60));
+            const h = Math.floor(minsLeft / 60);
+            const m = minsLeft % 60;
+            if (h > 0) disp.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
+            else disp.textContent = `${m}min`;
+        } else {
+            timer.style.display = 'none';
+        }
         return;
     }
 
     timer.style.display = 'block';
+    timer.classList.remove('done');
 
-    // Prefer the server-provided estimated_remaining_minutes (uses real power)
-    const c = lastCharge || {};
+    if (c.state === 'completing') {
+        // Carro parou de consumir — fim real só quando o disjuntor desligar
+        disp.textContent = '⏹ FINALIZANDO';
+        return;
+    }
+
+    // Carregando: previsão do servidor (potência real), fallback no cliente.
+    // NUNCA mostra "COMPLETO" enquanto estiver carregando.
     let minsLeft = null;
     if (c.estimated_remaining_minutes != null && c.estimated_remaining_minutes > 0) {
         minsLeft = c.estimated_remaining_minutes;
     } else {
-        // Fallback: client-side calc
+        // Pausa do carro (<10W)? usa potência nominal no lugar
+        const pw = powerW >= 10 ? powerW : targetPower;
         const needKwh = Math.max(0, (targetSoc - currentSoc) / 100 * batteryKwh);
-        const hoursLeft = needKwh / Math.max(0.1, powerW / 1000);
+        const hoursLeft = needKwh / Math.max(0.1, (pw / 1000) * carEff);
         minsLeft = Math.max(0, Math.round(hoursLeft * 60));
     }
-
-    if (c.target_reached) {
-        timer.classList.add('done');
-        disp.textContent = '✅ COMPLETO';
-    } else {
-        timer.classList.remove('done');
-        const h = Math.floor(minsLeft / 60);
-        const m = Math.round(minsLeft % 60);
-        if (h > 0) disp.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
-        else disp.textContent = `${m}m`;
+    if (minsLeft <= 0) {
+        disp.textContent = '—';
+        return;
     }
+    const h = Math.floor(minsLeft / 60);
+    const m = Math.round(minsLeft % 60);
+    if (h > 0) disp.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
+    else disp.textContent = `${m}m`;
 }
 
 function calcAndShowPlan(soc, target, batt, power, cost) {
@@ -1018,11 +1027,13 @@ function calcAndShowPlan(soc, target, batt, power, cost) {
     const currentKwh = batt * effectiveSoc / 100;
     const targetKwh = batt * target / 100;
     const neededKwh = Math.max(0, targetKwh - currentKwh);
+    // Taxa efetiva na bateria = potência de rede × eficiência
     const avgRate = (lastCharge && lastCharge.charging && lastCharge.estimated_remaining_minutes)
         ? neededKwh / (lastCharge.estimated_remaining_minutes / 60)
-        : power / 1000;
+        : (power / 1000) * carEff;
     const hours = neededKwh / Math.max(0.1, avgRate);
-    const costVal = neededKwh * cost;
+    // Custo sobre kWh da REDE (o que o medidor cobra), não da bateria
+    const costVal = (neededKwh / Math.max(0.1, carEff)) * cost;
 
     const pk = document.getElementById('planKwh');
     const pt = document.getElementById('planTime');
@@ -1073,7 +1084,7 @@ function onCurrentSocInput(val) {
         etaEl.style.color = 'var(--ok)';
     } else {
         const needKwh = Math.max(0, (target - soc) / 100 * batt);
-        const hours = needKwh / Math.max(0.1, power / 1000);
+        const hours = needKwh / Math.max(0.1, (power / 1000) * carEff);
         const mins = Math.round(hours * 60);
         if (mins < 60) {
             etaEl.textContent = `${mins} min`;
@@ -1166,7 +1177,10 @@ async function loadHistory() {
     if (!curYear) { const n = new Date(); curYear = n.getFullYear(); curMonth = n.getMonth()+1; }
     document.getElementById('monthDisp').textContent = `${MES[curMonth-1]} ${curYear}`;
     try {
-        const [monthly, daily] = await Promise.all([fetch(`/api/monthly?year=${curYear}&month=${curMonth}`), fetch('/api/daily-history?days=30')]);
+        const [monthly, daily] = await Promise.all([
+            fetch(`/api/monthly?year=${curYear}&month=${curMonth}`),
+            fetch(`/api/daily-history?year=${curYear}&month=${curMonth}`),
+        ]);
         const mData = await monthly.json(), dData = await daily.json();
         renderSummary(mData);
         renderDailyChart(dData.days);
@@ -1191,9 +1205,10 @@ function renderDailyChart(days) {
     if (!cDaily || !days?.length) return;
     const s = [...days].reverse();
     cDaily.data.labels = s.map(d => d.date.split('-')[2]+'/'+d.date.split('-')[1]);
-    // Stacked bars: fase1 + breaker
+    // Barras empilhadas: medidor da casa (fase1) + medidor do carro (breaker).
+    // São circuitos SEPARADOS — fase1 NÃO inclui o carro, então nada de subtrair.
     cDaily.data.datasets = [
-        {label:'Casa (kWh)', data:s.map(d => Math.max(0, (d.consumed_kwh||0) - (d.breaker_kwh||0))), backgroundColor:'rgba(0,212,170,0.7)', borderColor:'#00d4aa', borderWidth:1, borderRadius:4, stack:'stack0'},
+        {label:'Casa (kWh)', data:s.map(d => d.consumed_kwh || 0), backgroundColor:'rgba(0,212,170,0.7)', borderColor:'#00d4aa', borderWidth:1, borderRadius:4, stack:'stack0'},
         {label:'Carro (kWh)', data:s.map(d => d.breaker_kwh || 0), backgroundColor:'rgba(59,130,246,0.7)', borderColor:'#3b82f6', borderWidth:1, borderRadius:4, stack:'stack0'},
     ];
     cDaily.options.scales.x.stacked = true;
@@ -1293,19 +1308,21 @@ async function loadCharges() {
             const kwhRate = s.duration_seconds > 0
                 ? (s.energy_delivered_kwh / (s.duration_seconds / 3600)).toFixed(2)
                 : '—';
-            const socStart = (s.soc_start ?? 0).toFixed(0);
-            const socEnd = s.soc_end != null ? s.soc_end.toFixed(0) : '—';
+            const socCell = s.soc_start != null
+                ? `${s.soc_start.toFixed(0)}% → ${s.soc_end != null ? s.soc_end.toFixed(0) : '—'}%`
+                : '—';
             const statusLabel = ({
                 'active': 'EM ANDAMENTO',
                 'completed': 'OK',
                 'auto_stopped': 'AUTO',
                 'aborted': 'INTERROMPIDO',
                 'no_charge': 'SEM CARGA',
+                'reconstructed': 'RECUPERADA',
             })[s.status] || s.status;
             return `<tr>
                 <td>${fmtDateTime(s.start_time)}</td>
                 <td class="num">${fmtDuration(s.duration_seconds)}</td>
-                <td class="num">${socStart}% → ${socEnd}%</td>
+                <td class="num">${socCell}</td>
                 <td class="num">${(s.energy_delivered_kwh || 0).toFixed(2)} kWh</td>
                 <td class="num" style="color:var(--ok)">R$ ${(s.total_cost || 0).toFixed(2)}</td>
                 <td class="num">${kwhRate}</td>
@@ -1316,17 +1333,6 @@ async function loadCharges() {
         console.error('loadCharges error:', e);
         tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:2rem">Erro ao carregar sessões.</td></tr>';
     }
-}
-
-// ─── ADMIN ───
-async function syncCloud() {
-    if (!confirm('Forçar download da cloud?')) return;
-    try { const d = await (await fetch('/api/cloud-sync',{method:'POST'})).json(); alert(JSON.stringify(d,null,2)); loadHistory(); } catch(e) { alert('Erro: '+e.message); }
-}
-async function clearDb() {
-    if (!confirm('⚠️ Apagar TODO histórico local?')) return;
-    if (!confirm('Tem certeza?')) return;
-    try { const d = await (await fetch('/api/clear-db',{method:'POST'})).json(); alert(`Removidos: ${d.deleted}`); loadHistory(); } catch(e) { alert('Erro: '+e.message); }
 }
 
 // ─── SETTINGS ───

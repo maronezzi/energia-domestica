@@ -17,7 +17,7 @@ Sistema **100% local** de monitoramento e controle de energia residencial com in
 ### Arquitetura
 
 - **Monolito single-file**: toda a lógica do backend vive em `src/dashboard.py` (~2300 linhas) — endpoints FastAPI, polling loop em thread daemon, state machine de carregamento, helpers de DB.
-- **`ChargingTracker`** (classe em `dashboard.py`): máquina de estados (`idle → charging → completing → done`) que calcula SOC efetivo a partir do delta de energia do disjuntor. Auto-stop só quando SOC ≥ meta **E** potência fica ociosa por N segundos.
+- **`ChargingTracker`** (classe em `dashboard.py`): máquina de estados (`idle → charging → completing → idle`) que calcula SOC efetivo a partir do delta de energia do disjuntor. Auto-stop quando a potência fica ociosa por N segundos (o fim é detectado por potência, funciona também sem meta de SOC). Ao finalizar volta sempre a `idle` — a auto-detecção no `poll_loop` só dispara a partir de `idle`.
 - **Thread-safe**: `State` e `ChargingTracker` usam `threading.Lock`. O polling loop roda em thread daemon separada.
 - **Frontend**: `src/index.html` — SPA vanilla JS com abas (Dashboard, Carregamentos, Config). Sem build step.
 - **DB**: 3 tabelas — `readings`, `daily_snapshots`, `charge_sessions`. Migrations inline via `ALTER TABLE` em `init_db()`.

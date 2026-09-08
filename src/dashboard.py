@@ -70,6 +70,7 @@ DEFAULT_CONFIG = {
     "car_charge_power_w": 2400,
     "car_target_soc": 80,
     "car_current_soc": 50,
+    "car_current_soc_ts": None,  # when the user last informed the SOC explicitly
     "car_charging": False,
     "car_charge_start_kwh": 0,  # Breaker energy counter at charge start
     "car_charge_start_time": None,  # ISO timestamp
@@ -693,8 +694,12 @@ def _backfill_snapshots_from_readings():
             br_power_by_day[day].append((ts, pw or 0))
 
         days = sorted(set(f1_by_day.keys()) | set(br_power_by_day.keys()))
-        # Include today too (in-progress day). The poll_loop will close it properly at next-day rollover
-        # and overwrite if needed (but we want a real number for the current day's chart bar).
+        # NÃO incluir o dia em curso: snapshot parcial (restart/backfill no
+        # meio do dia) congela a barra do dia no gráfico até a meia-noite —
+        # db_daily_history integra o dia corrente ao vivo, e o rollover da
+        # virada grava o snapshot fechado e completo.
+        today = datetime.now().strftime("%Y-%m-%d")
+        days = [d for d in days if d < today]
         n_f1, n_br = 0, 0
         for day in days:
             f1_kwh = (
@@ -907,6 +912,35 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
             ) * 100
             soc_end = min(100.0, soc_end)
         total_cost = energy_delivered * (cost_per_kwh or 0)
+        # Reconciliação do SOC inicial: quando a sessão termina porque o CARRO
+        # parou sozinho (end_reason='auto'), o fim é o 100% real da bateria —
+        # então o soc_start verdadeiro é 100% − energia entregue ÷ eficiência.
+        # O soc_start gravado no início era só estimativa (soc_end da sessão
+        # anterior), que satura em 100% antes do carro terminar.
+        if (
+            end_reason == "auto"
+            and soc_end is not None
+            and soc_end >= 99
+            and energy_delivered >= 0.5
+            and battery_kwh
+        ):
+            eff = load_config().get("car_charge_efficiency", 0.85)
+            soc_start_real = max(
+                0.0, soc_end - (energy_delivered * eff / max(0.1, battery_kwh)) * 100
+            )
+            if soc_start is None or abs(soc_start - soc_start_real) > 0.05:
+                print(
+                    f"🔁 SOC inicial reconciliado: {soc_start and round(soc_start, 1)}% "
+                    f"→ {soc_start_real:.1f}% ({energy_delivered:.2f} kWh até o carro parar)"
+                )
+            soc_start = round(soc_start_real, 2)
+            # Semeia o campo "SOC Atual do Carro" com o valor aprendido: a
+            # próxima carga parte dessa estimativa (padrão de uso se repete),
+            # e a reconciliação do fim dela vai corrigir de novo.
+            # Campo é inteiro — arredonda para BAIXO (conservador).
+            _cfg_end = load_config()
+            _cfg_end["car_current_soc"] = int(soc_start)
+            save_config(_cfg_end)
         # Sessions that delivered no energy are marked "no_charge" so they
         # don't pollute the Carregamentos tab with phantom entries.
         if energy_delivered < 0.05:
@@ -920,13 +954,15 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
         conn.execute(
             """UPDATE charge_sessions
                SET end_time = ?, end_energy_kwh = ?, energy_delivered_kwh = ?,
-                   duration_seconds = ?, soc_end = ?, total_cost = ?, end_reason = ?, status = ?
+                   duration_seconds = ?, soc_start = ?, soc_end = ?, total_cost = ?,
+                   end_reason = ?, status = ?
                WHERE session_uuid = ?""",
             (
                 end_dt.isoformat(),
                 end_energy_kwh,
                 energy_delivered,
                 duration,
+                soc_start,
                 soc_end,
                 total_cost,
                 end_reason,
@@ -1156,6 +1192,228 @@ def charge_sessions_summary(days=90, limit_days=None):
         conn.close()
 
 
+def estimate_car_soc_start(cfg):
+    """Estimate the car's SOC when a session starts without explicit input
+    (breaker flipped manually — auto-detect path).
+
+    Ciclo de aprendizado: quando a última sessão terminou com o carro cheio
+    (auto + soc_end ≥ 99), o soc_start dela foi reconciliado no fim para o
+    SOC REAL de partida — é a melhor estimativa para a próxima plugada
+    (padrão de uso se repete), muito melhor que o soc_end=100 que satura.
+    Sessão que NÃO terminou cheia → usa o soc_end dela (último SOC conhecido).
+    Um /api/car/soc explícito informado DEPOIS do fim dessa sessão ganha
+    (o usuário sabe: rodou com o carro). Sem histórico → car_current_soc.
+
+    Returns (soc, estimated) where estimated=False means the value came from
+    explicit user input.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT soc_end, soc_start, end_time, end_reason FROM charge_sessions "
+            "WHERE status NOT IN ('active', 'no_charge') AND soc_end IS NOT NULL "
+            "AND end_time IS NOT NULL "
+            "ORDER BY start_time DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    cfg_soc = cfg.get("car_current_soc")
+    cfg_ts = cfg.get("car_current_soc_ts")
+
+    def _clamp(v):
+        return max(0.0, min(100.0, float(v)))
+
+    if row:
+        soc_end, soc_start, end_time, end_reason = row
+        if cfg_soc is not None and cfg_ts:
+            try:
+                if datetime.fromisoformat(str(cfg_ts)) > datetime.fromisoformat(
+                    str(end_time)
+                ):
+                    return _clamp(cfg_soc), False
+            except ValueError:
+                pass  # timestamp corrompido — trata como não informado
+        # Sessão completa (carro encheu sozinho): usa o SOC inicial reconciliado
+        if end_reason == "auto" and soc_end >= 99 and soc_start is not None:
+            return int(_clamp(soc_start)), True
+        return int(_clamp(soc_end)), True
+    if cfg_soc is not None:
+        return int(_clamp(cfg_soc)), False
+    return 50.0, True
+
+
+def update_session_soc_start(session_uuid, soc_start):
+    """Persist a mid-session SOC correction to the session's soc_start so the
+    Carregamentos tab reports the corrected value."""
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE charge_sessions SET soc_start = ? WHERE session_uuid = ?",
+            (soc_start, session_uuid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _detect_charge_windows(
+    rows, active_threshold_w=50, bridge_gap_s=900.0
+):
+    """Group (timestamp, power_w) readings into charging windows.
+
+    A sample is 'active' when power > active_threshold_w. Consecutive active
+    samples closer than bridge_gap_s belong to the same window — the counter-
+    delta power estimator dips below the threshold for seconds at a time, so
+    short gaps MUST bridge or one charge becomes dozens of fragments.
+    Returns [(first_ts, last_ts, samples)] with samples=[(ts, w), ...].
+    """
+    windows = []
+    cur = None
+    for ts_str, w in rows:
+        if w <= active_threshold_w:
+            continue
+        if cur is not None and (
+            datetime.fromisoformat(ts_str) - datetime.fromisoformat(cur[1])
+        ).total_seconds() <= bridge_gap_s:
+            cur[1] = ts_str
+            cur[2].append((ts_str, w))
+        else:
+            if cur is not None:
+                windows.append(cur)
+            cur = [ts_str, ts_str, [(ts_str, w)]]
+    if cur is not None:
+        windows.append(cur)
+    return windows
+
+
+def backfill_charge_sessions_from_readings():
+    """Recreate charge sessions for charging events that were measured but
+    never recorded (service was down/restarted mid-charge, or the pre-2026-09
+    auto-detect bug left breaker-ON charging without a session).
+
+    Windows of breaker power >50 W (gaps ≤15 min bridged) are integrated the
+    same way the daily history does it, so Histórico and Carregamentos
+    reconcile. Windows overlapping an existing session (±5 min) are skipped.
+    Reconstructed rows get status='reconstructed' (no SOC info — the car's
+    dashboard state at the time is unknown) and are included in summaries.
+
+    One-shot per install (gate in config `charge_sessions_backfill_v1`).
+    """
+    _cfg = load_config()
+    if _cfg.get("charge_sessions_backfill_v1"):
+        return 0
+
+    conn = get_db()
+    created = 0
+    try:
+        existing = conn.execute(
+            "SELECT start_time, end_time FROM charge_sessions"
+        ).fetchall()
+        existing_spans = [
+            (
+                datetime.fromisoformat(s),
+                datetime.fromisoformat(e) if e else None,
+            )
+            for s, e in existing
+        ]
+        rows = conn.execute(
+            "SELECT timestamp, phase_c, breaker_energy FROM readings "
+            "WHERE device='fase1' AND phase_c IS NOT NULL ORDER BY timestamp"
+        ).fetchall()
+        energy_by_ts = {t: e for t, _w, e in rows if e is not None}
+        windows = _detect_charge_windows(
+            [(t, w) for t, w, _e in rows]
+        )
+        cost = _cfg.get("kwh_cost", 0.956)
+
+        for first_ts, last_ts, samples in windows:
+            # Integral idêntico ao do Histórico (_sql_kwh/_kwh_from_power_integral)
+            energy = 0.0
+            for i in range(1, len(samples)):
+                t1, p1 = samples[i - 1]
+                t2, p2 = samples[i]
+                dt_s = (
+                    datetime.fromisoformat(t2) - datetime.fromisoformat(t1)
+                ).total_seconds()
+                if 0 < dt_s < 120 and (p1 + p2) / 2 > 0:
+                    energy += (p1 + p2) / 2000.0 * (dt_s / 3600.0)
+            if energy < 0.05:
+                continue
+            duration = int(
+                max(
+                    0,
+                    (
+                        datetime.fromisoformat(last_ts)
+                        - datetime.fromisoformat(first_ts)
+                    ).total_seconds(),
+                )
+            )
+
+            # Delta do contador cumulativo (DPS 1) é mais preciso que a
+            # integral quando não houve falhas de leitura. Só aceita delta
+            # plausível (0 ≤ delta ≤ integral + folga); senão fica a integral.
+            start_e = end_e = None
+            delta = None
+            if len(samples) >= 2:
+                e_first = energy_by_ts.get(samples[0][0])
+                e_last = energy_by_ts.get(samples[-1][0])
+                if e_first is not None and e_last is not None:
+                    delta = round(e_last - e_first, 4)
+                    start_e, end_e = round(e_first, 4), round(e_last, 4)
+            if delta is None or delta < 0.05 or delta > energy + 0.5 + 0.3 * energy:
+                delta = round(energy, 4)
+                start_e = end_e = None
+
+            w_start = datetime.fromisoformat(first_ts)
+            w_end = datetime.fromisoformat(last_ts)
+            tol = timedelta(minutes=5)
+            if any(
+                s <= w_end + tol and (e is None or e >= w_start - tol)
+                for s, e in existing_spans
+            ):
+                continue  # já registrada (ou sessão ativa em curso)
+
+            conn.execute(
+                """INSERT INTO charge_sessions
+                   (session_uuid, start_time, end_time, status,
+                    start_energy_kwh, end_energy_kwh, energy_delivered_kwh,
+                    duration_seconds, avg_power_w, cost_per_kwh, total_cost,
+                    end_reason)
+                   VALUES (?, ?, ?, 'reconstructed', ?, ?, ?, ?, ?, ?, ?,
+                           'reconstructed')""",
+                (
+                    str(_uuid.uuid4()),
+                    first_ts,
+                    last_ts,
+                    start_e,
+                    end_e,
+                    delta,
+                    duration,
+                    # delta em kWh × 1000 → potência média em W
+                    round(delta * 1000 / (duration / 3600.0), 0)
+                    if duration > 0
+                    else 0,
+                    cost,
+                    round(delta * cost, 2),
+                ),
+            )
+            created += 1
+            print(
+                f"🔁 Sessão recuperada das leituras: {first_ts[:16]} → "
+                f"{last_ts[:16]} ({delta:.2f} kWh, {duration // 60} min)"
+            )
+        conn.commit()
+        _cfg2 = load_config()
+        _cfg2["charge_sessions_backfill_v1"] = True
+        save_config(_cfg2)
+        if created:
+            print(f"🔁 Backfill de sessões: {created} recuperadas das leituras")
+    finally:
+        conn.close()
+    return created
+
+
 # ─── LOCAL-FIRST DB queries ─────────────────────────────────────
 def db_today_stats():
     """Calculate today's consumption using LOCAL data.
@@ -1216,12 +1474,15 @@ def db_today_stats():
         conn.close()
 
 
-def db_daily_history(days=30):
+def db_daily_history(days=30, year=None, month=None):
     """Return daily consumption from LOCAL snapshots.
 
     Snapshots store **consumed kWh per day** (already integrated from power×time),
     not cumulative readings — so we return them directly without diffing.
     Queries are bounded to the requested window so the index does the work.
+
+    Modo mês: `year`+`month` retornam o calendário daquele mês (usado pela
+    navegação ◀ ▶ do Histórico). Sem eles: últimos `days` dias.
     """
     cfg = load_config()
     cost = cfg.get("kwh_cost", 0.956)
@@ -1229,8 +1490,27 @@ def db_daily_history(days=30):
     conn = get_db()
     try:
         today = datetime.now().date()
-        start_day = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
-        tomorrow = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        today_str = today.strftime("%Y-%m-%d")
+        if year and month:
+            first = datetime(year, month, 1)
+            nxt = datetime(year + (1 if month == 12 else 0),
+                           1 if month == 12 else month + 1, 1)
+            last = nxt - timedelta(days=1)
+            sorted_days = [
+                (first + timedelta(days=i)).strftime("%Y-%m-%d")
+                for i in range((last - first).days + 1)
+            ]
+            # dias futuros do mês corrente não existem — fora da tabela/gráfico
+            sorted_days = [d for d in sorted_days if d <= today_str]
+            start_day = sorted_days[0]
+            tomorrow = nxt.strftime("%Y-%m-%d")
+        else:
+            start_day = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+            tomorrow = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+            sorted_days = [
+                (today - timedelta(days=d)).strftime("%Y-%m-%d")
+                for d in range(days - 1, -1, -1)
+            ]
 
         # Get snapshots within the window only
         snap_rows = conn.execute(
@@ -1252,16 +1532,15 @@ def db_daily_history(days=30):
 
         # Get last N days, fill missing with 0, compute from readings when missing
         result = []
-        sorted_days = [(today - timedelta(days=d)).strftime("%Y-%m-%d") for d in range(days - 1, -1, -1)]
 
         # Today has no snapshot yet (rollover closes it after midnight):
         # average power comes from its own small range query.
         today_avg = 0.0
-        if f1_daily.get(sorted_days[-1]) is None:
+        if today_str in sorted_days and f1_daily.get(today_str) is None:
             r = conn.execute(
                 "SELECT AVG(power) FROM readings WHERE device='fase1' "
                 "AND timestamp>=? AND timestamp<? AND power IS NOT NULL",
-                (sorted_days[-1], tomorrow),
+                (today_str, tomorrow),
             ).fetchone()
             today_avg = round(r[0], 1) if r and r[0] is not None else 0.0
 
@@ -1271,15 +1550,14 @@ def db_daily_history(days=30):
 
             next_day = sorted_days[i + 1] if i + 1 < len(sorted_days) else tomorrow
 
-            # If no snapshot for this day, compute directly in SQL
-            # so daily stays in sync with the hourly chart.
-            if f1 == 0:
+            # Dias fechados usam o snapshot (autoritativo). O dia EM CURSO é
+            # sempre integrado ao vivo — um snapshot dele (backfill pós-migração
+            # ou restart) é parcial e congelaria a barra do dia até a meia-noite.
+            if day == today_str or f1 == 0:
                 f1 = _sql_kwh(conn, "power", day, next_day)
 
-            # Same fallback for the breaker (car) — phase_c stores breaker power.
-            # Snapshots only exist after day rollover, so the current day would
-            # otherwise show 0 for the car even while it's charging.
-            if br == 0:
+            # Breaker (carro) — phase_c stores breaker power.
+            if day == today_str or br == 0:
                 br = _sql_kwh(conn, "phase_c", day, next_day)
 
             result.append(
@@ -1290,7 +1568,7 @@ def db_daily_history(days=30):
                     "breaker_kwh": br,
                     "breaker_cost": round(br * cost, 2),
                     "cost": round(f1 * cost, 2),
-                    "avg_power_w": f1_avg.get(day) or (today_avg if day == sorted_days[-1] else 0),
+                    "avg_power_w": f1_avg.get(day) or (today_avg if day == today_str else 0),
                 }
             )
 
@@ -1399,19 +1677,20 @@ class ChargingTracker:
     and use that to project the *effective* SOC.
 
     Lifecycle:
-        1. User clicks "Start"  → start_charge()  → state = CHARGING
+        1. User clicks "Start" (or poll_loop auto-detects breaker ON with load)
+           → start() → state = CHARGING
         2. While CHARGING, we keep measuring energy delta + power draw
-        3. When effective SOC >= target AND power drops to idle → state = COMPLETING
+        3. When power drops to idle → state = COMPLETING
         4. We wait car_charge_idle_seconds_to_stop to confirm the car really stopped
-        5. Then turn breaker OFF → state = DONE
-        6. If effective SOC >= target but power is still high, we KEEP the breaker ON
-           (car is balancing / equalising / not yet full)
+        5. Then turn breaker OFF → stop() → state = IDLE (ready for the next
+           session — auto-detect only fires from IDLE, so "done" must not linger)
+        6. If power comes back during COMPLETING, we go back to CHARGING and
+           KEEP the breaker ON (car is balancing / equalising / not yet full)
     """
 
     STATE_IDLE = "idle"
     STATE_CHARGING = "charging"
     STATE_COMPLETING = "completing"  # target reached, waiting for car to stop pulling
-    STATE_DONE = "done"  # auto-stopped after idle confirmation
     STATE_ERROR = "error"
 
     def __init__(self):
@@ -1463,8 +1742,16 @@ class ChargingTracker:
             self.last_active_time = None
 
     def stop(self, reason="manual"):
+        """End the session and return to IDLE unconditionally.
+
+        Regressão: antes o auto-stop deixava state=STATE_DONE, e a
+        auto-detecção no poll_loop só dispara a partir de IDLE — o próximo
+        carregamento (disjuntor ligado manualmente) ficava sem sessão e sem
+        registro no DB até um restart do serviço. Fora de CHARGING/COMPLETING
+        o único estado válido é IDLE.
+        """
         with self.lock:
-            self.state = self.STATE_DONE if reason == "auto" else self.STATE_IDLE
+            self.state = self.STATE_IDLE
             self.message = f"Parado ({reason})"
             # Reset for next session
             self.start_time = None
@@ -1479,6 +1766,29 @@ class ChargingTracker:
             self.power_sum = 0.0
             self.power_count = 0
             self.last_active_time = None
+
+    def apply_soc_correction(self, new_soc):
+        """User corrected the SOC mid-session (dashboard input).
+
+        Rebases start_soc so effective_soc reflects the informed value right
+        away, keeping the energy-based slope for the rest of the session.
+        Returns the rebased start_soc, or None when no session is live.
+        """
+        with self.lock:
+            if self.state not in (self.STATE_CHARGING, self.STATE_COMPLETING):
+                return None
+            last_e = (
+                self.energy_samples[-1][1]
+                if self.energy_samples
+                else self.start_energy_kwh
+            )
+            energy_delta = max(0.0, last_e - self.start_energy_kwh)
+            gained = (
+                energy_delta * self.efficiency / max(0.1, self.battery_kwh)
+            ) * 100
+            self.start_soc = max(0.0, min(100.0, float(new_soc)) - gained)
+            self.effective_soc = max(0.0, min(100.0, float(new_soc)))
+            return self.start_soc
 
     def update(
         self, current_energy_kwh, current_power_w, idle_power_w, idle_seconds_needed,
@@ -1601,6 +1911,7 @@ class ChargingTracker:
                     "estimated_remaining_minutes": None,
                     "target_reached": False,
                     "idle_seconds": 0,
+                    "idle_seconds_needed": self.idle_seconds_needed,
                 }
 
             now = datetime.now()
@@ -1660,6 +1971,7 @@ class ChargingTracker:
                 else None,
                 "target_reached": self.effective_soc >= self.target_soc,
                 "idle_seconds": int(idle_seconds),
+                "idle_seconds_needed": self.idle_seconds_needed,
                 "current_power_w": self.last_power_w,
             }
 
@@ -1742,6 +2054,9 @@ def poll_loop():
     # Usado para desligar o disjuntor quando não há sessão ativa.
     breaker_idle_since = None
 
+    # Limiar de potência que caracteriza "carro carregando" na auto-detecção.
+    cfg_start_power_w = load_config().get("car_charge_start_power_w", 500)
+
     # Debounce do estado do switch: polls consecutivos com switch=0.
     # Uma leitura isolada de 0 costuma ser ruído de comunicação (ver
     # breaker_off_confirmed), não um desligamento real.
@@ -1786,7 +2101,8 @@ def poll_loop():
                 and br.get("switch", False)
                 and charging.state == ChargingTracker.STATE_IDLE
                 and (
-                    br.get("power_w", 0) > 500
+                    br.get("power_w", 0)
+                    > cfg_start_power_w
                     or (
                         br.get("energy_wh", 0) > 0
                         and prev_br_counter_kwh is not None
@@ -1796,15 +2112,24 @@ def poll_loop():
                 )
             ):
                 cfg_detect = load_config()
+                # SOC inicial: usuário pode ter ligado o disjuntor manualmente
+                # sem informar o SOC — estima a partir da última sessão.
+                soc_start, soc_estimated = estimate_car_soc_start(cfg_detect)
+                if soc_estimated:
+                    print(
+                        f"⚡ SOC inicial estimado em {soc_start:.0f}% "
+                        f"(última sessão / config — corrija no dashboard se o "
+                        f"carro rodou desde a última carga)"
+                    )
                 session = create_charge_session(
-                    soc_start=cfg_detect.get("car_current_soc", 50),
+                    soc_start=soc_start,
                     soc_target=cfg_detect.get("car_target_soc", 80),
                     battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
                     start_energy_kwh=br.get("energy_kwh", 0),
                     cost_per_kwh=cfg_detect.get("kwh_cost", 0.956),
                 )
                 charging.start(
-                    start_soc=cfg_detect.get("car_current_soc", 50),
+                    start_soc=soc_start,
                     target_soc=cfg_detect.get("car_target_soc", 80),
                     battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
                     start_energy_kwh=br.get("energy_kwh", 0),
@@ -1812,9 +2137,10 @@ def poll_loop():
                 )
                 # Sync config so recovery and UI reflect the auto-detected session
                 cfg_detect["car_charging"] = True
+                cfg_detect["car_current_soc"] = soc_start
                 cfg_detect["car_charge_start_kwh"] = br.get("energy_kwh", 0)
                 cfg_detect["car_charge_start_time"] = datetime.now().isoformat()
-                cfg_detect["car_charge_start_soc"] = cfg_detect.get("car_current_soc", 50)
+                cfg_detect["car_charge_start_soc"] = soc_start
                 save_config(cfg_detect)
                 print("⚡ Auto-detected charging: breaker ON with power, starting session")
 
@@ -1846,6 +2172,7 @@ def poll_loop():
                 prev_br_counter_ts = datetime.now()
 
             cfg = load_config()
+            cfg_start_power_w = cfg.get("car_charge_start_power_w", 500)
 
             # ── Charging tracker update + auto-stop check ──
             if charging.state in (
@@ -1994,6 +2321,7 @@ def poll_loop():
                 # O dia virou — fecha o dia que estava em curso
                 closing_day = last_snapshot_day
                 conn = get_db()
+                snap_ok = False
                 try:
                     f1_rows = conn.execute(
                         "SELECT timestamp, power FROM readings "
@@ -2037,6 +2365,7 @@ def poll_loop():
                             (closing_day, br_kwh, datetime.now().isoformat()),
                         )
                     conn.commit()
+                    snap_ok = True
                     print(
                         f"📸 Snapshot fechado para {closing_day}: fase1={f1_kwh}kWh breaker={br_kwh}kWh"
                     )
@@ -2044,11 +2373,14 @@ def poll_loop():
                     print(f"⚠️ Erro ao fechar snapshot de {closing_day}: {e}")
                 finally:
                     conn.close()
-                # Persiste o novo "último dia fechado" na config
-                _cfg2 = load_config()
-                _cfg2["last_snapshot_day"] = today
-                save_config(_cfg2)
-                last_snapshot_day = today
+                # Persiste o novo "último dia fechado" na config SOMENTE se o
+                # snapshot foi gravado; senão mantém o marcador para retry na
+                # próxima iteração (evita perder o dia em caso de lock/erro).
+                if snap_ok:
+                    _cfg2 = load_config()
+                    _cfg2["last_snapshot_day"] = today
+                    save_config(_cfg2)
+                    last_snapshot_day = today
             elif not last_snapshot_day:
                 # Primeira execução: registra o dia atual sem fechar nada
                 _cfg3 = load_config()
@@ -2087,13 +2419,15 @@ def api_today():
 
 
 @app.get("/api/daily-history")
-def api_daily_history(days: int = 30):
+def api_daily_history(
+    days: int = 30, year: int = None, month: int = None
+):
     days = max(1, min(days, 365))
-    key = ("daily_history", days)
+    key = ("daily_history", days, year, month)
     cached = _ttl_get(key, 45)
     if cached is not None:
         return {"days": cached}
-    result = db_daily_history(days)
+    result = db_daily_history(days=days, year=year, month=month)
     _ttl_put(key, result)
     return {"days": result}
 
@@ -2124,11 +2458,16 @@ def db_monthly_stats(year: int, month: int):
         )
 
         daily = []
+        today_str = datetime.now().strftime("%Y-%m-%d")
         day = datetime.fromisoformat(first).date()
         last_d = datetime.fromisoformat(last).date()
         while day < last_d:
             ds = day.strftime("%Y-%m-%d")
-            if ds in by_day and by_day[ds] is not None:
+            if ds == today_str:
+                # Dia em curso: snapshot parcial engana o total — integra ao vivo
+                nd = (day + timedelta(days=1)).strftime("%Y-%m-%d")
+                kwh = _sql_kwh(conn, "power", ds, nd)
+            elif ds in by_day and by_day[ds] is not None:
                 kwh = round(by_day[ds], 4)
             else:
                 nd = (day + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -2266,8 +2605,18 @@ def api_car_soc(soc: int = 0):
     """Update current SOC (state of charge)."""
     cfg = load_config()
     cfg["car_current_soc"] = max(0, min(100, soc))
+    cfg["car_current_soc_ts"] = datetime.now().isoformat()
     save_config(cfg)
-    return {"success": True, "car_current_soc": cfg["car_current_soc"]}
+    # Mid-session correction: rebase the tracker (effective_soc follows the
+    # informed value immediately) and the session row so the report is truthful.
+    rebased = charging.apply_soc_correction(soc)
+    if rebased is not None and charging.session_uuid:
+        update_session_soc_start(charging.session_uuid, rebased)
+    return {
+        "success": True,
+        "car_current_soc": cfg["car_current_soc"],
+        "applied_to_session": rebased is not None,
+    }
 
 
 @app.post("/api/car/target")
@@ -2321,24 +2670,28 @@ def api_car_start_charge():
         cost_per_kwh = cfg.get("kwh_cost", 0.956)
         # Use breaker energy counter for session tracking (scaled to kWh)
         start_energy = br.get("energy_kwh", 0) or 0
+        # SOC inicial: se o usuário não informou após a última carga, estima
+        # a partir do soc_end dela; input explícito recente tem precedência.
+        soc_start, _soc_estimated = estimate_car_soc_start(cfg)
         session = create_charge_session(
-            soc_start=cfg.get("car_current_soc", 50),
+            soc_start=soc_start,
             soc_target=cfg.get("car_target_soc", 80),
             battery_kwh=cfg.get("car_battery_kwh", 12.9),
             start_energy_kwh=start_energy,
             cost_per_kwh=cost_per_kwh,
         )
         charging.start(
-            start_soc=cfg.get("car_current_soc", 50),
+            start_soc=soc_start,
             target_soc=cfg.get("car_target_soc", 80),
             battery_kwh=cfg.get("car_battery_kwh", 12.9),
             start_energy_kwh=start_energy,
             session_uuid=session["session_uuid"],
         )
         cfg["car_charging"] = True
+        cfg["car_current_soc"] = soc_start
         cfg["car_charge_start_kwh"] = br.get("energy_kwh", 0)
         cfg["car_charge_start_time"] = datetime.now().isoformat()
-        cfg["car_charge_start_soc"] = cfg.get("car_current_soc", 50)
+        cfg["car_charge_start_soc"] = soc_start
         save_config(cfg)
         return {
             "success": True,
@@ -2574,6 +2927,8 @@ if __name__ == "__main__":
     # Recover active charge session from DB (survives service restarts).
     # Always check the DB — don't rely solely on the config flag, which can
     # be stale after crashes or external breaker toggles.
+    backfill_charge_sessions_from_readings()
+
     _cfg = load_config()
     _conn = get_db()
     try:
@@ -2622,7 +2977,7 @@ if __name__ == "__main__":
         _cfg["car_charging"] = True
         _cfg["car_charge_start_time"] = _start_ts
         _cfg["car_charge_start_kwh"] = _start_e
-        _cfg["car_current_soc"] = _recover_soc
+        _cfg["car_current_soc"] = int(_recover_soc)
         save_config(_cfg)
     elif _cfg.get("car_charging"):
         # Config says charging but no active DB session — start fresh
