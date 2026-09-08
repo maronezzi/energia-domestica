@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-09-08
+
+### Fixed
+- 🐛 **Consumo Diário/Detalhamento "voltaram" ao valor errado** — o fix de 07/09 (dia em curso integrado ao vivo) funcionou ontem, mas à meia-noite o rollover tentou fechar o snapshot de 07/09 e FALHOU em toda iteração: o `INSERT` do snapshot fase1 tinha 6 valores para 5 colunas (`VALUES (?, 'fase1', ?, ?, ?, ?)` — um `?` sobrando, 4 params). O snapshot PARCIAL da manhã (gravado pelo backfill pré-fix: casa 2,91 / carro 3,31 kWh) ficou no banco e virou autoritativo quando 07/09 virou dia fechado. Correção do SQL + restart: rollover regravou 07/09 completo (casa 4,75 / carro 10,63 kWh, bate com a sessão de 10,40). Como o erro era silencioso por dia (`snap_ok=False` mantém `last_snapshot_day` para retry), o log `⚠️ Erro ao fechar snapshot` agora é o sinal — estava funcionando, só ninguém tinha olhado.
+
 ### Added
 - 🆕 **Ciclo de aprendizado do SOC** — a reconciliação do fim de sessão agora alimenta a próxima: (1) `finalize_charge_session` grava o SOC inicial reconciliado no campo "SOC Atual do Carro" (config + dashboard); (2) `estimate_car_soc_start` passa a usar o **SOC inicial reconciliado da última sessão completa** (carro encheu sozinho) como estimativa de partida da próxima — em vez do soc_end=100%, que satura a estimativa na primeira leitura. Sessão que não terminou cheia continua usando o soc_end dela; input explícito do usuário (com timestamp posterior) sempre ganha. Loop: plugou → estimativa aprendida → carregou → reconciliou → campo atualizado → próxima plugada parte do valor aprendido.
 - 🆕 **Reconciliação do SOC inicial no fim da sessão** — quando a sessão termina porque o CARRO parou sozinho (`end_reason='auto'`, soc_end ≥ 99%), o soc_start verdadeiro é retrocalculado: `100% − (energia entregue × eficiência ÷ bateria)`. A estimativa carregada no início (soc_end da sessão anterior) satura em 100% antes do carro encher — na sessão de 07/09 a estimativa dizia 73,4% mas o carro puxou 10,40 kWh até parar, ou seja, partiu de ~31,5%. Gravado no fim da sessão automaticamente; sessão de hoje corrigida retroativamente (31% → 100%).

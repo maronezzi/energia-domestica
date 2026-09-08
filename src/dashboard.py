@@ -2351,7 +2351,7 @@ def poll_loop():
                     if f1_kwh > 0:
                         conn.execute(
                             """INSERT INTO daily_snapshots (snapshot_date, device, energy_kwh, avg_power_w, created_at)
-                               VALUES (?, 'fase1', ?, ?, ?, ?)
+                               VALUES (?, 'fase1', ?, ?, ?)
                                ON CONFLICT(snapshot_date, device) DO UPDATE SET
                                  energy_kwh = excluded.energy_kwh,
                                  avg_power_w = excluded.avg_power_w""",
