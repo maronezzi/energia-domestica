@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-09-12
+
+### Fixed
+- 🐛 **"🔋 SOC Atual do Carro" não atualizava após a carga** — no fim da sessão o campo era semeado com o soc_start RECONCILIADO (ex.: 31%), que é a estimativa de partida da PRÓXIMA carga (padrão de uso se repete) — não onde o carro está. Resultado: o usuário via o SOC subir até 100% durante a carga e "voltar" para o valor da carga anterior quando a sessão encerrava. Agora o campo recebe o soc_end (100% quando o carro para sozinho; soc_end parcial em fim manual) com timestamp do fim — a estimativa de partida continua por conta de `estimate_car_soc_start` (soc_start reconciliado da última sessão completa); input explícito do usuário com ts estritamente posterior continua ganhando, pois o ts semeado é IGUAL ao end_time. Migração one-shot `car_soc_field_end_v1` re-semeia o campo com o fim da última sessão real (corrige o 31% preso da carga de 11/09).
+
 ## [Unreleased] - 2026-09-08
 
 ### Fixed

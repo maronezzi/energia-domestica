@@ -549,11 +549,15 @@ class TestChargeSessionDB(unittest.TestCase):
         self.assertAlmostEqual(soc, 31, places=1)  # campo inteiro: piso
 
     def test_finalize_auto_syncs_car_current_soc(self):
-        """No fim reconciliado, o campo 'SOC Atual do Carro' (config) recebe o
-        SOC aprendido, semeando a próxima carga."""
+        """No fim de uma carga real, o campo 'SOC Atual do Carro' (config)
+        recebe o soc_end — onde o carro ESTÁ (100% quando para sozinho) —
+        com timestamp do fim da sessão. A estimativa de partida da próxima
+        carga é papel de estimate_car_soc_start (soc_start reconciliado),
+        não do campo."""
         import dashboard
         from dashboard import (
             create_charge_session,
+            estimate_car_soc_start,
             finalize_charge_session,
             load_config,
         )
@@ -565,11 +569,17 @@ class TestChargeSessionDB(unittest.TestCase):
             s["session_uuid"], end_energy_kwh=110.4,
             soc_end=100.0, end_reason="auto",
         )
-        self.assertAlmostEqual(
-            load_config()["car_current_soc"],
-            31,  # campo inteiro: piso do reconciliado
-            places=1,
-        )
+        cfg = load_config()
+        self.assertEqual(cfg["car_current_soc"], 100)
+        self.assertIsNotNone(cfg["car_current_soc_ts"])
+        # O timestamp semeado é o end_time (igual, não posterior): NÃO conta
+        # como input explícito — a próxima plugada estima pelo reconciliado.
+        soc, estimated = estimate_car_soc_start({
+            "car_current_soc": cfg["car_current_soc"],
+            "car_current_soc_ts": cfg["car_current_soc_ts"],
+        })
+        self.assertTrue(estimated)
+        self.assertAlmostEqual(soc, 31, places=1)  # piso do reconciliado
 
     def test_list_charge_sessions_active_sorted_first(self):
         """`list_charge_sessions(include_active=True)` must surface the active

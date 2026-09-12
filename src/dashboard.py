@@ -70,7 +70,7 @@ DEFAULT_CONFIG = {
     "car_charge_power_w": 2400,
     "car_target_soc": 80,
     "car_current_soc": 50,
-    "car_current_soc_ts": None,  # when the user last informed the SOC explicitly
+    "car_current_soc_ts": None,  # fim da última sessão real ou input explícito do usuário
     "car_charging": False,
     "car_charge_start_kwh": 0,  # Breaker energy counter at charge start
     "car_charge_start_time": None,  # ISO timestamp
@@ -380,6 +380,27 @@ def init_db():
         _cfg["snapshots_avg_v1"] = True
         save_config(_cfg)
         print(f"DB migration v3: backfilled avg_power_w em {len(rows)} snapshots")
+    # Migration v4: o fim de sessão semeava "SOC Atual do Carro" com o soc_start
+    # reconciliado (estimativa de partida da próxima carga) — o dashboard
+    # principal ficava preso no SOC do INÍCIO da última carga. Re-semear com o
+    # soc_end da última sessão real (onde o carro está de fato).
+    if not _cfg.get("car_soc_field_end_v1"):
+        row = conn.execute(
+            "SELECT soc_end, end_time FROM charge_sessions "
+            "WHERE soc_end IS NOT NULL AND end_time IS NOT NULL "
+            "AND status NOT IN ('active', 'no_charge') "
+            "AND COALESCE(energy_delivered_kwh, 0) >= 0.05 "
+            "ORDER BY start_time DESC LIMIT 1"
+        ).fetchone()
+        _cfg["car_soc_field_end_v1"] = True
+        if row:
+            _cfg["car_current_soc"] = int(row[0])
+            _cfg["car_current_soc_ts"] = row[1]
+            print(
+                f"DB migration v4: 'SOC Atual do Carro' re-semido com o fim da "
+                f"última sessão real ({int(row[0])}%)"
+            )
+        save_config(_cfg)
     conn.commit()
     conn.close()
 
@@ -934,12 +955,16 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
                     f"→ {soc_start_real:.1f}% ({energy_delivered:.2f} kWh até o carro parar)"
                 )
             soc_start = round(soc_start_real, 2)
-            # Semeia o campo "SOC Atual do Carro" com o valor aprendido: a
-            # próxima carga parte dessa estimativa (padrão de uso se repete),
-            # e a reconciliação do fim dela vai corrigir de novo.
-            # Campo é inteiro — arredonda para BAIXO (conservador).
+        # O campo "SOC Atual do Carro" reflete onde o carro ESTÁ: fim de carga
+        # real → soc_end (100% quando o carro para sozinho). A estimativa de
+        # partida da próxima carga NÃO vem daqui — estimate_car_soc_start usa o
+        # soc_start reconciliado da última sessão completa (padrão de uso se
+        # repete). Timestamp semeado = end_time (igual, não estritamente
+        # posterior): input explícito do usuário continua com precedência.
+        if soc_end is not None and energy_delivered >= 0.05:
             _cfg_end = load_config()
-            _cfg_end["car_current_soc"] = int(soc_start)
+            _cfg_end["car_current_soc"] = int(soc_end)  # inteiro: piso (conservador)
+            _cfg_end["car_current_soc_ts"] = end_dt.isoformat()
             save_config(_cfg_end)
         # Sessions that delivered no energy are marked "no_charge" so they
         # don't pollute the Carregamentos tab with phantom entries.
