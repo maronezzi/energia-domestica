@@ -298,7 +298,7 @@
         <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">⚡</div><div><div class="si-label">Consumo</div><div class="si-val"><span id="vPower">—</span> <span class="si-unit">W</span></div></div></div>
         <div class="status-item"><div class="si-icon" style="background:rgba(59,130,246,.15)">🔌</div><div><div class="si-label">Tensão</div><div class="si-val"><span id="vVoltage">—</span> <span class="si-unit">V</span></div></div></div>
         <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">🔋</div><div><div class="si-label">Corrente</div><div class="si-val"><span id="vCurrent">—</span> <span class="si-unit">A</span></div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">📊</div><div><div class="si-label">Energia</div><div class="si-val"><span id="vEnergy">—</span> <span class="si-unit">kWh</span></div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">📊</div><div><div class="si-label">Energia hoje</div><div class="si-val"><span id="vEnergy">—</span> <span class="si-unit">kWh</span></div></div></div>
         <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">💰</div><div><div class="si-label">Custo Mês</div><div class="si-val" style="color:var(--ok)" id="vMonthCost">R$ —</div></div></div>
         <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">📅</div><div><div class="si-label">Custo Hoje</div><div class="si-val" style="color:var(--warn)" id="vTodayCost">R$ —</div></div></div>
     </div>
@@ -526,7 +526,7 @@
     <!-- Realtime charts -->
     <div class="charts-grid">
         <div class="chart-card"><h3>📈 Potência (W) — últimos 10min</h3><div class="chart-box"><canvas id="chartPower"></canvas></div></div>
-        <div class="chart-card"><h3>🔋 Energia Acumulada (kWh)</h3><div class="chart-box"><canvas id="chartEnergy"></canvas></div></div>
+        <div class="chart-card"><h3>🔋 Energia Acumulada — hoje (kWh)</h3><div class="chart-box"><canvas id="chartEnergy"></canvas></div></div>
     </div>
 </div>
 
@@ -654,7 +654,7 @@
 <footer>Dashboard local &bull; Dados nunca saem da rede &bull; <a href="/api/status" target="_blank">API</a></footer>
 
 <script>
-const POLL = 6000;
+const POLL = 3000;
 let kwhCost = 0.956, curYear, curMonth;
 let cPower, cEnergy, cDaily, cHourly;
 
@@ -706,21 +706,29 @@ function initCharts() {
 }
 
 const MAX_PTS = 100;
+const ENERGY_WIN_MS = 10 * 60 * 1000;  // janela visível do acumulado: últimos 10 min
+let eTimes = [];
 function pushRT(power, energy) {
-    const t = new Date().toLocaleTimeString('pt-BR', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const now = Date.now();
+    const t = new Date(now).toLocaleTimeString('pt-BR', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
     if (cPower) {
         cPower.data.labels.push(t); cPower.data.datasets[0].data.push(power);
         if (cPower.data.labels.length > MAX_PTS) { cPower.data.labels.shift(); cPower.data.datasets[0].data.shift(); }
         cPower.update('none');
     }
-    if (cEnergy) {
+    if (cEnergy && energy != null) {
+        // Curva ascendente do acumulado do dia: o servidor integra power×tempo
+        // (/api/today) e o gráfico amostra esse total a cada poll.
         cEnergy.data.labels.push(t); cEnergy.data.datasets[0].data.push(energy);
-        if (cEnergy.data.labels.length > MAX_PTS) { cEnergy.data.labels.shift(); cEnergy.data.datasets[0].data.shift(); }
+        eTimes.push(now);
+        while (eTimes.length && eTimes[0] < now - ENERGY_WIN_MS) {
+            eTimes.shift(); cEnergy.data.labels.shift(); cEnergy.data.datasets[0].data.shift();
+        }
         cEnergy.update('none');
     }
 }
 
-function updateUI(data) {
+function updateUI(data, todayKwh) {
     const devs = data.devices || {};
     const ts = new Date().toLocaleTimeString('pt-BR');
     document.getElementById('liveDot').classList.remove('offline');
@@ -733,7 +741,10 @@ function updateUI(data) {
     }
     const f1 = devs.fase1;
     if (!f1) return;
-    const P = f1.power ?? 0, V = f1.voltage ?? 0, I = f1.current ?? 0, E = f1.energy ?? 0;
+    const P = f1.power ?? 0, V = f1.voltage ?? 0, I = f1.current ?? 0;
+    // Acumulado do dia: integral power×tempo do servidor (/api/today).
+    // O DPS 17 do medidor não é um contador confiável (diminui e reseta sozinho).
+    const E = todayKwh ?? null;
     document.getElementById('vPower').textContent = fmt(P);
     document.getElementById('vVoltage').textContent = fmt(V);
     document.getElementById('vCurrent').textContent = I > 0 ? I.toFixed(2) : '—';
@@ -894,6 +905,14 @@ async function refreshChargeState() {
 
 function updateChargeSession(c) {
     const idleProg = document.getElementById('csIdleProgress');
+
+    // Dica de partida da próxima carga (aprendida da última sessão completa).
+    // Só quando estimada — se for input explícito do usuário, o campo já o exibe.
+    const socHint = document.getElementById('socCurrentHint');
+    if (socHint) {
+        socHint.textContent = (!c.charging && c.next_start_soc_is_estimate && c.next_start_soc != null)
+            ? `próxima carga inicia em ~${c.next_start_soc}% (estimado)` : '';
+    }
 
     if (!c.charging && c.state !== 'completing') {
         // Not charging - hide timer
@@ -1150,7 +1169,7 @@ async function fetchStatus() {
         const data = await status.json(), td = await today.json();
         const c = await charge.json();
         lastCharge = c;
-        updateUI(data);
+        updateUI(data, td.today_kwh);
         updateChargeSession(c);
         document.getElementById('vTodayCost').textContent = fmtR(td.today_cost || 0);
         document.getElementById('vMonthCost').textContent = fmtR(td.month_cost || 0);

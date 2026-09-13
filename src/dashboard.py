@@ -82,7 +82,8 @@ DEFAULT_CONFIG = {
     "car_charge_efficiency": 0.85,  # Charging efficiency (grid→battery). Tune to match car app estimate.
     "cloud_enabled": False,  # Cloud OFF by default - user decides
 }
-DB_MAX_ROWS = 200000
+# 17280 leituras/dia a 5s → ~29 dias de histórico bruto antes do prune
+DB_MAX_ROWS = 500000
 
 
 # ─── State (thread-safe) ────────────────────────────────────────
@@ -492,8 +493,15 @@ def get_cloud_logs(device_id, days=2, use_cache=True):
 
 # ─── Device reads ──────────────────────────────────────────────
 def connect_device(cfg):
+    # Timeouts curtos: o default do tinytuya (5s de timeout × 5 retries)
+    # fazia um device lento/offline travar a coleta por ~25s por ciclo.
     return tinytuya.Device(
-        cfg["id"], address=cfg["ip"], local_key=cfg["key"], version=cfg["version"]
+        cfg["id"],
+        address=cfg["ip"],
+        local_key=cfg["key"],
+        version=cfg["version"],
+        connection_timeout=3,
+        connection_retry_limit=1,
     )
 
 
@@ -2059,16 +2067,56 @@ def breaker_off_confirmed(off_streak, confirm_polls=3):
 
 
 # ─── Poll loop ──────────────────────────────────────────────────
-POLL_INTERVAL = 10  # seconds
+POLL_INTERVAL = 5  # seconds — fase1 + lógica de controle
+BREAKER_POLL_INTERVAL = 10  # seconds — breaker (só interessa durante carga)
+
+
+def _reader_loop(key, cfg, interval):
+    """Thread de leitura de um device, em cadência própria.
+
+    Cada device tem sua thread: um breaker lento/offline (o UPDATEDPS do DPS 6
+    frequentemente fica sem resposta) não atrasa a coleta da fase1. O prazo da
+    próxima leitura é absoluto (deadline), então o período real acompanha o
+    intervalo configurado em vez de acumular o tempo de leitura.
+    """
+    dev = None
+    next_t = time.time()
+    while True:
+        try:
+            if dev is None:
+                dev = connect_device(cfg)
+            if key == "fase1":
+                state.update(key, read_fase1(dev))
+            elif key == "breaker":
+                state.update(key, read_breaker(dev))
+        except Exception as e:
+            print(f"Erro {key}: {e}")
+            dev = None
+        next_t += interval
+        delay = next_t - time.time()
+        if delay < 0.1:
+            # Leitura demorou mais que o intervalo — reancora sem acumular dívida
+            next_t = time.time() + interval
+            delay = interval
+        time.sleep(delay)
 
 
 def poll_loop():
-    devs = {}
+    # Threads de leitura: fase1 e breaker em paralelo, cada um no seu ritmo
+    for key, cfg in DEVICES.items():
+        interval = BREAKER_POLL_INTERVAL if key == "breaker" else POLL_INTERVAL
+        threading.Thread(
+            target=_reader_loop, args=(key, cfg, interval), daemon=True
+        ).start()
+
     prune_counter = 0
     # Recupera último dia com snapshot (persiste entre restarts)
     _cfg = load_config()
     last_snapshot_day = _cfg.get("last_snapshot_day", "")
-    print(f"🔄 Polling iniciado. last_snapshot_day={last_snapshot_day or '(nenhum)'}")
+    print(
+        f"🔄 Polling iniciado (fase1={POLL_INTERVAL}s, breaker={BREAKER_POLL_INTERVAL}s). "
+        f"last_snapshot_day={last_snapshot_day or '(nenhum)'}"
+    )
 
     # Previous breaker energy counter (kWh) + timestamp, used to estimate power
     # from the DPS 1 cumulative delta when DPS 6 (V×I) reads 0 during charging.
@@ -2094,19 +2142,6 @@ def poll_loop():
 
     while True:
         try:
-            for key, cfg in DEVICES.items():
-                try:
-                    if key not in devs:
-                        devs[key] = connect_device(cfg)
-                    d = devs[key]
-                    if key == "fase1":
-                        state.update(key, read_fase1(d))
-                    elif key == "breaker":
-                        state.update(key, read_breaker(d))
-                except Exception as e:
-                    print(f"Erro {key}: {e}")
-                    devs.pop(key, None)
-
             with state.lock:
                 f1 = state.latest.get("fase1", {})
                 br = state.latest.get("breaker", {})
@@ -2263,9 +2298,7 @@ def poll_loop():
                             "🔌 Auto-stopping breaker (charge complete, idle confirmed)"
                         )
                         try:
-                            d_brk = devs.get("breaker") or connect_device(
-                                DEVICES["breaker"]
-                            )
+                            d_brk = connect_device(DEVICES["breaker"])
                             d_brk.set_value(BREAKER_SWITCH_DPS, False)
                             time.sleep(1)
                             state.update("breaker", read_breaker(d_brk))
@@ -2326,9 +2359,7 @@ def poll_loop():
                             f"sem consumo — desligando disjuntor"
                         )
                         try:
-                            d_brk = devs.get("breaker") or connect_device(
-                                DEVICES["breaker"]
-                            )
+                            d_brk = connect_device(DEVICES["breaker"])
                             d_brk.set_value(BREAKER_SWITCH_DPS, False)
                             time.sleep(1)
                             state.update("breaker", read_breaker(d_brk))
@@ -2420,7 +2451,6 @@ def poll_loop():
 
         except Exception as e:
             print(f"Poll error: {e}")
-            devs = {}
         time.sleep(POLL_INTERVAL)
 
 
@@ -2771,7 +2801,16 @@ def api_car_stop_charge():
 @app.get("/api/charge/state")
 def api_charge_state():
     """Detailed charging session state from the tracker."""
-    return charging.get_status()
+    st = charging.get_status()
+    if not st.get("charging"):
+        # Estimativa de partida da próxima carga — aprendida do soc_start
+        # reconciliado da última sessão completa (ou do último input do
+        # usuário). O frontend mostra como dica ao lado do campo editável;
+        # is_estimate=False significa input explícito (o campo já o exibe).
+        est, is_estimate = estimate_car_soc_start(load_config())
+        st["next_start_soc"] = est
+        st["next_start_soc_is_estimate"] = is_estimate
+    return st
 
 
 @app.get("/api/charge/sessions")
