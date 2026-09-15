@@ -12,7 +12,7 @@ echo "→ Deploy energia-domestica → cubie2 ($IP)"
 rsync -az --no-perms --no-owner --no-group \
   --exclude='.git' --exclude='.gitignore' \
   --exclude='__pycache__' --exclude='.pytest_cache' --exclude='.ruff_cache' \
-  --exclude='.qwen' --exclude='logs' --exclude='venv' \
+  --exclude='.qwen' --exclude='logs' --exclude='venv' --exclude='.venv' \
   --exclude='data/' \
   "$SRC/" "root@${IP}:/media/mmcblk0p1/energia/"
 

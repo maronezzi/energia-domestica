@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased] - 2026-09-15
+
+### Fixed
+- 🐛 **Dashboard "Offline" por disco cheio na cubie2** — o `querylog.json` do AdGuardHome (mesma partição `/media/mmcblk0p1`) cresceu até encher os 467MB (219MB só de logs DNS: a retenção `interval: 3d` do AdGuard só purga o arquivo no restart). Sem espaço, o SQLite lançava `disk I/O error`, `/api/today` e `/api/charge/state` retornavam 500 e o frontend marcava "Offline" (a coleta parou às 16:10). Recuperação: querylog em arquivo desativado no AdGuard (`file_enabled: false` — mantém buffer de 1000 entradas em RAM visível na UI), logs antigos apagados, backup `apkovl.bak-20260910` movido para o PC. Banco verificado `PRAGMA quick_check: ok`, sem corrupção. Disco: 0MB → 254MB livres.
+
+### Changed
+- 📉 **Rate-limit dos warnings que inundavam o `service.log`** — três fontes de spam a cada poll agora avisam com moderação: "fase1 voltage OK but power=0" só na transição pra idle (era 1 linha a cada 5s durante a madrugada inteira), `Poll error` e `Erro fase1/breaker` só no 1º erro e depois 1x/hora com contagem de consecutivos (360 ciclos), zerando ao recuperar. Era assim que o log chegava a MBs e ajudava a encher a partição. `deploy_cubie.sh` passa a excluir `.venv` (um venv local de testes foi rsyncado pra placa numa deploy e a FAT não suporta symlinks).
+
+### Added
+- 🆕 **Vigia de disco na cubie2** (`/etc/vigia/vigia-disco.sh`, cron */15, commitado no lbu) — alerta via Telegram quando a partição persistente passa de 85%, com debounce de 6h e mensagem de normalização, no mesmo padrão dos vigias de túnel/Vibe-Trading. Nasceu do incidente de hoje: sem ele, o disco encheu silenciosamente até derrubar o energia. Rotação semanal do `service.log` via cron (cp+truncate, segunda 05:10 — `mv` quebraria o fd aberto pelo supervise-daemon).
+
 ## [Unreleased] - 2026-09-13
 
 ### Changed

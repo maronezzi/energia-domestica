@@ -515,6 +515,9 @@ def _to_num(v, default=0):
         return default
 
 
+_F1_IDLE_WARNED = False
+
+
 def read_fase1(d):
     """Read fase1 meter with retry + validation.
 
@@ -523,6 +526,7 @@ def read_fase1(d):
     is unreliable and often None — treated as optional (returned as None, not
     a skip trigger).
     """
+    global _F1_IDLE_WARNED
     last_err = None
     for attempt in range(3):
         try:
@@ -536,10 +540,16 @@ def read_fase1(d):
             if voltage > 50:
                 power = round(p_raw / 10, 1)
                 if power == 0:
-                    print(
-                        f"⚠️  fase1: voltage OK ({voltage}V) but power=0 "
-                        f"— idle state or bad read"
-                    )
+                    # Avisa só na transição pra idle — em repouso isso é o
+                    # estado normal e o aviso a cada poll inundava o log.
+                    if not _F1_IDLE_WARNED:
+                        print(
+                            f"⚠️  fase1: voltage OK ({voltage}V) but power=0 "
+                            f"— idle state or bad read"
+                        )
+                        _F1_IDLE_WARNED = True
+                else:
+                    _F1_IDLE_WARNED = False
                 return {
                     "voltage": voltage,
                     "current": round(i_raw / 1000, 3),
@@ -2080,6 +2090,7 @@ def _reader_loop(key, cfg, interval):
     intervalo configurado em vez de acumular o tempo de leitura.
     """
     dev = None
+    err_streak = 0
     next_t = time.time()
     while True:
         try:
@@ -2089,8 +2100,12 @@ def _reader_loop(key, cfg, interval):
                 state.update(key, read_fase1(dev))
             elif key == "breaker":
                 state.update(key, read_breaker(dev))
+            err_streak = 0
         except Exception as e:
-            print(f"Erro {key}: {e}")
+            # 1º erro e depois ~1x/hora — falha persistente não inunda o log
+            err_streak += 1
+            if err_streak == 1 or err_streak % 360 == 0:
+                print(f"Erro {key} ({err_streak} consecutivos): {e}")
             dev = None
         next_t += interval
         delay = next_t - time.time()
@@ -2110,6 +2125,7 @@ def poll_loop():
         ).start()
 
     prune_counter = 0
+    err_streak = 0
     # Recupera último dia com snapshot (persiste entre restarts)
     _cfg = load_config()
     last_snapshot_day = _cfg.get("last_snapshot_day", "")
@@ -2450,7 +2466,13 @@ def poll_loop():
                 prune_counter = 0
 
         except Exception as e:
-            print(f"Poll error: {e}")
+            # 1º erro e depois ~1x/hora (360 ciclos × 5s) — falha persistente
+            # (ex.: disco cheio) não inunda o service.log.
+            err_streak += 1
+            if err_streak == 1 or err_streak % 360 == 0:
+                print(f"Poll error ({err_streak} consecutivos): {e}")
+        else:
+            err_streak = 0
         time.sleep(POLL_INTERVAL)
 
 
