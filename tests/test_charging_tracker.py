@@ -29,7 +29,7 @@ _tmpdir = tempfile.mkdtemp(prefix="energia_test_")
 os.makedirs(f"{_tmpdir}/data", exist_ok=True)
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class TestChargingTracker(unittest.TestCase):
@@ -674,6 +674,226 @@ class TestChargeSessionDB(unittest.TestCase):
         self.assertTrue(estimated)
         self.assertAlmostEqual(soc, 72, places=1)  # campo inteiro: piso
 
+    # ── Carga completa confiante: 100% real como referência (sessão 128) ──
+
+    _N128 = dict(soc_start=15.0, soc_target=100, battery_kwh=12.9,
+                 start_energy_kwh=1010.5, cost_per_kwh=0.91693)
+
+    def _row(self, session_uuid):
+        import dashboard
+        return [r for r in dashboard.list_charge_sessions(limit=10)
+                if r["session_uuid"] == session_uuid][0]
+
+    def test_confident_full_pins_soc_end_and_reconciles_start(self):
+        """Sessão 128 (28/09): o modelo estimou soc_end=92,09% mas o carro
+        parou SOZINHO com energia ≥90% do necessário — ele estava em 100% real.
+        O fim é pinado em 100 e o soc_start é recalculado de trás pra frente."""
+        import dashboard
+        from dashboard import create_charge_session, finalize_charge_session
+        s = create_charge_session(**self._N128)
+        result = finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=1022.2, soc_end=92.09,
+            end_reason="auto", charge_complete_confident=True,
+        )
+        self.assertAlmostEqual(result["soc_end"], 100.0, places=6)
+        # η aprendida = (100−15)% × 12,9 kWh ÷ 11,7 kWh = 0,937
+        row = self._row(s["session_uuid"])
+        self.assertAlmostEqual(row["soc_start"], 15.02, places=1)
+        self.assertAlmostEqual(row["soc_end"], 100.0, places=6)
+        # A eficiência aprendida foi persistida no config
+        cfg = dashboard.load_config()
+        self.assertAlmostEqual(cfg["car_charge_efficiency"], 0.937, places=3)
+        # "SOC Atual do Carro" = onde o carro ESTÁ: 100 (pino inteiro)
+        self.assertEqual(cfg["car_current_soc"], 100)
+
+    def test_confident_full_learned_eff_reconciles_with_new_value(self):
+        """A reconciliação usa a eficiência ACABADA de aprender, não a antiga:
+        com η=0,937, 11,7 kWh ⇄ ~85% de bateria → partida ≈ 15% (o padrão de
+        uso que 'está batendo com o real'), não 22,9% (que a η=0,85 daria)."""
+        from dashboard import create_charge_session, finalize_charge_session
+        s = create_charge_session(**self._N128)
+        finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=1022.2, soc_end=92.09,
+            end_reason="auto", charge_complete_confident=True,
+        )
+        soc_start = self._row(s["session_uuid"])["soc_start"]
+        self.assertAlmostEqual(soc_start, 15.0, places=1)
+        self.assertLess(soc_start, 20)  # longe do 22,9 da η velha
+
+    def test_probe_conclude_keeps_energy_estimate(self):
+        """Sonda sem retomada prova que o carro não voltou — NÃO que encheu.
+        soc_end fica na estimativa energética e nada é aprendido."""
+        import dashboard
+        from dashboard import create_charge_session, finalize_charge_session
+        s = create_charge_session(**self._N128)
+        result = finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=1022.2, soc_end=92.09,
+            end_reason="auto", charge_complete_confident=False,
+        )
+        self.assertAlmostEqual(result["soc_end"], 92.09, places=6)
+        cfg = dashboard.load_config()
+        self.assertAlmostEqual(cfg["car_charge_efficiency"], 0.85, places=3)
+
+    def test_confident_full_implausible_efficiency_not_learned(self):
+        """Energia implausível (η fora de 0,70–1,00) não vira aprendizado —
+        mas o soc_end continua pinado em 100 (a parada confiante é fato)."""
+        import dashboard
+        from dashboard import create_charge_session, finalize_charge_session
+        s = create_charge_session(soc_start=15.0, soc_target=100, battery_kwh=12.9,
+                                  start_energy_kwh=100.0, cost_per_kwh=1.0)
+        # 2,5 kWh para 85% de bateria → η=4,39, absurdo
+        result = finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=102.5, soc_end=34.4,
+            end_reason="auto", charge_complete_confident=True,
+        )
+        self.assertAlmostEqual(result["soc_end"], 100.0, places=6)
+        cfg = dashboard.load_config()
+        self.assertAlmostEqual(cfg["car_charge_efficiency"], 0.85, places=3)
+        # Reconciliação cai na η configurada: 100 − 2,5×0,85/12,9×100 ≈ 83,5
+        self.assertAlmostEqual(self._row(s["session_uuid"])["soc_start"], 83.5,
+                               places=1)
+
+    def test_finalize_config_write_survives_stale_cache(self):
+        """Race do lost update: finalize grava car_current_soc no config num
+        momento em que o cache de load_config (<2s) ainda segura o dict velho.
+        A leitura FEITA DEPOIS do finalize (como o poll loop agora faz) tem que
+        enxergar a escrita, não o valor congelado."""
+        import dashboard
+        from dashboard import create_charge_session, finalize_charge_session
+        # Estado pré-sessão: partida semeada com 15 (como na placa)
+        seeded = dashboard.load_config()
+        seeded["car_current_soc"] = 15
+        dashboard.save_config(seeded)
+        s = create_charge_session(**self._N128)
+        stale = dashboard.load_config()  # o que o poll loop segurava antes
+        self.assertEqual(stale["car_current_soc"], 15)
+        finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=1022.2, soc_end=92.09,
+            end_reason="auto", charge_complete_confident=True,
+        )
+        fresh = dashboard.load_config()  # o que o poll loop recarrega hoje
+        self.assertEqual(fresh["car_current_soc"], 100)
+        self.assertEqual(stale["car_current_soc"], 15)  # dict velho intacto
+
+
+class TestChargeSessionsPeriodFilter(unittest.TestCase):
+    """Filtro de período (days/since) em list_charge_sessions e no summary —
+    a tabela de Carregamentos tem que obedecer ao mesmo período dos cards.
+    Datas RELATIVAS a now() para valer em qualquer dia do mês."""
+
+    def setUp(self):
+        import dashboard
+        # Redirect to temp DB for this test (mesmo padrão de TestChargeSessionDB)
+        self._orig_db = dashboard.DB_FILE
+        self._orig_cfg = dashboard.CONFIG_FILE
+        dashboard.DB_FILE = Path(_tmpdir) / "data" / "tuya_history.db"
+        dashboard.CONFIG_FILE = Path(_tmpdir) / "data" / "tuya_config.json"
+        # Start with a clean DB for each test
+        if dashboard.DB_FILE.exists():
+            dashboard.DB_FILE.unlink()
+        if dashboard.CONFIG_FILE.exists():
+            dashboard.CONFIG_FILE.unlink()
+        dashboard.init_db()
+        dashboard._cfg_cache = None
+        self.starts = {}
+
+    def tearDown(self):
+        import dashboard
+        dashboard.DB_FILE = self._orig_db
+        dashboard.CONFIG_FILE = self._orig_cfg
+        dashboard._cfg_cache = None
+
+    def _insert_session(self, uuid, start_dt, status="completed"):
+        import dashboard
+        conn = dashboard.get_db()
+        try:
+            conn.execute(
+                "INSERT INTO charge_sessions"
+                " (session_uuid, start_time, end_time, status,"
+                "  energy_delivered_kwh, duration_seconds, total_cost)"
+                " VALUES (?, ?, ?, ?, 5.0, 3600, 4.78)",
+                (uuid, start_dt.isoformat(),
+                 (start_dt + datetime.timedelta(hours=1)).isoformat(), status),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.starts[uuid] = start_dt.isoformat()
+
+    def _seed(self):
+        now = datetime.datetime.now()
+        self.month_start_iso = now.replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+        self.old_uuid = "antiga-40d"          # fora até do filtro de mês
+        self.recent_uuid = "recente-2d"       # dentro de days=7
+        self.this_month_uuid = "mes-corrente"  # dia 1º, 05:00
+        self.last_month_uuid = "mes-passado"   # dia anterior ao dia 1º
+        self._insert_session(self.old_uuid, now - datetime.timedelta(days=40))
+        self._insert_session(self.recent_uuid, now - datetime.timedelta(days=2))
+        self._insert_session(
+            self.this_month_uuid,
+            now.replace(day=1, hour=5, minute=0, second=0, microsecond=0),
+        )
+        self._insert_session(
+            self.last_month_uuid,
+            now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            - datetime.timedelta(days=1),
+        )
+
+    def test_list_sessions_filters_by_days(self):
+        from dashboard import list_charge_sessions
+        self._seed()
+        rows = {s["session_uuid"]
+                for s in list_charge_sessions(limit=50, days=7)}
+        self.assertIn(self.recent_uuid, rows)
+        self.assertNotIn(self.old_uuid, rows)
+
+    def test_list_sessions_days_9999_and_no_filter_include_old(self):
+        from dashboard import list_charge_sessions
+        self._seed()
+        for kwargs in ({"days": 9999}, {}):
+            rows = {s["session_uuid"]
+                    for s in list_charge_sessions(limit=50, **kwargs)}
+            self.assertIn(self.old_uuid, rows, f"kwargs={kwargs}")
+            self.assertIn(self.recent_uuid, rows, f"kwargs={kwargs}")
+
+    def test_list_sessions_filters_by_since_month_start(self):
+        from dashboard import list_charge_sessions
+        self._seed()
+        rows = {s["session_uuid"] for s in
+                list_charge_sessions(limit=50, since=self.month_start_iso)}
+        self.assertIn(self.this_month_uuid, rows)
+        self.assertNotIn(self.last_month_uuid, rows)
+
+    def test_summary_since_filters_month_and_overrides_days(self):
+        """since=1º do mês conta só as sessões do mês — e sobrepõe days
+        (days=9999 + since=NÃO volta a listar o histórico todo)."""
+        from dashboard import charge_sessions_summary
+        self._seed()
+        # Esperado calculado das próprias fixtures (recente cai no mês se
+        # hoje é dia ≥3; as outras duas estão sempre fora)
+        expected = sum(1 for iso in self.starts.values()
+                       if iso >= self.month_start_iso)
+        self.assertGreaterEqual(expected, 1)
+        month = charge_sessions_summary(since=self.month_start_iso)
+        self.assertEqual(month["session_count"], expected)
+        both = charge_sessions_summary(days=9999, since=self.month_start_iso)
+        self.assertEqual(both["session_count"], expected)
+
+    def test_list_sessions_include_active_with_days_keeps_active(self):
+        """Sessão ATIVA em andamento continua listada com include_active=True
+        + days=7 (o corte de período não esconde a carga do momento)."""
+        from dashboard import list_charge_sessions
+        self._seed()
+        self._insert_session("ativa-agora", datetime.datetime.now(),
+                             status="active")
+        rows = {s["session_uuid"] for s in list_charge_sessions(
+            limit=50, include_active=True, days=7)}
+        self.assertIn("ativa-agora", rows)
+        self.assertIn(self.recent_uuid, rows)
+        self.assertNotIn(self.old_uuid, rows)
+
 
 class TestBreakerIdleWatchdog(unittest.TestCase):
     """Tests for the breaker idle watchdog helper."""
@@ -794,6 +1014,237 @@ class TestBreakerOffDebounce(unittest.TestCase):
         fn = self._fn()
         self.assertFalse(fn(4, confirm_polls=5))
         self.assertTrue(fn(5, confirm_polls=5))
+
+
+class TestChargeResumeProbe(unittest.TestCase):
+    """Sonda de retomada + critério de energia no fim de carga.
+
+    Incidente de 2026-09-22 (sessão 126): o carro pausou aos 62% (BMS/
+    térmica/renegociação) e após 120s de idle o auto-stop abriu o relé como
+    "carga completa" — end_reason='auto' com SOC estimado 62% e alvo 100%.
+    A pausa real derrubou potência E contador juntos (não era ruído do DPS 16).
+
+    Agora: energia injetada ≥ CONFIDENT_ENERGY_FRACTION do necessário até o
+    alvo → conclui direto; senão sonda (abre relé PROBE_OPEN_SECONDS, religa,
+    observa pela janela de idle) e só conclui se o carro NÃO retomar.
+    """
+
+    CONFIDENT_FRACTION = 0.9
+
+    def _tracker_pausado(self, delivered_kwh=5.7):
+        """Tracker em COMPLETING com a pausa confirmada (números de ontem:
+        25% → ~62%, 5,7 kWh entregues, alvo 100%)."""
+        from dashboard import ChargingTracker
+        t = ChargingTracker()
+        t.start(start_soc=25, target_soc=100, battery_kwh=12.9,
+                start_energy_kwh=979.1)
+        t.update(979.1 + delivered_kwh, 2600, 15, 300, efficiency=0.85)
+        t.update(979.1 + delivered_kwh, 0, 15, 300, efficiency=0.85)
+        self.assertEqual(t.state, t.STATE_COMPLETING)
+        # Janela de idle (300s) já decorrida
+        t.idle_started_at = datetime.datetime.now() - datetime.timedelta(
+            seconds=310
+        )
+        return t
+
+    def _action(self, t, power_w=0):
+        return t.auto_stop_action(
+            power_w=power_w, idle_power_w=15, idle_seconds_needed=300,
+            resume_power_w=500,
+        )
+
+    def test_low_energy_pause_probes_instead_of_concluding(self):
+        """O incidente de ontem: 5,7 kWh entregues quando faltavam ~11,4 —
+        pausa NÃO pode virar 'carga completa'; entra na sonda."""
+        t = self._tracker_pausado(delivered_kwh=5.7)
+        self.assertEqual(self._action(t), "probe_open")
+        self.assertTrue(t.is_probing())
+        self.assertEqual(t.probe_phase, "open")
+
+    def test_full_energy_pause_concludes_without_probe(self):
+        """11,5 kWh entregues (≥ 90% dos 11,4 necessários): o carro só pode
+        ter parado porque encheu — conclui sem sonda."""
+        t = self._tracker_pausado(delivered_kwh=11.5)
+        self.assertEqual(self._action(t), "conclude")
+        self.assertFalse(t.is_probing())
+
+    def test_soc_started_at_target_concludes(self):
+        """Começou no alvo (necessário = 0): qualquer pausa é fim real."""
+        from dashboard import ChargingTracker
+        t = ChargingTracker()
+        t.start(start_soc=100, target_soc=100, battery_kwh=12.9,
+                start_energy_kwh=979.1)
+        t.update(979.1, 2600, 15, 300, efficiency=0.85)
+        t.update(979.1, 0, 15, 300, efficiency=0.85)
+        t.idle_started_at = datetime.datetime.now() - datetime.timedelta(
+            seconds=310
+        )
+        self.assertEqual(self._action(t), "conclude")
+
+    def test_probe_cycle_open_close_observe_conclude(self):
+        """Sequência completa sem retomada: open → (120s) → close → observe
+        → (janela de idle) → conclude. A decisões são one-shot."""
+        t = self._tracker_pausado()
+        self.assertEqual(self._action(t), "probe_open")
+        # Antes dos 120s de relé aberto: nada a fazer
+        self.assertIsNone(self._action(t))
+        # 130s depois: hora de religar
+        t.probe_phase_since = t.probe_phase_since - datetime.timedelta(
+            seconds=130
+        )
+        self.assertEqual(self._action(t), "probe_close")
+        t.mark_probe_closed()
+        self.assertEqual(t.probe_phase, "observe")
+        # Carro não retomou logo após o religamento: ainda observa
+        self.assertIsNone(self._action(t))
+        # Janela de idle (300s) depois, ainda zerado: conclui
+        t.probe_phase_since = t.probe_phase_since - datetime.timedelta(
+            seconds=310
+        )
+        self.assertEqual(self._action(t), "probe_conclude")
+
+    def test_car_resumes_after_probe_keeps_charging(self):
+        """Carro retomou após o religamento: volta a CHARGING, sonda limpa —
+        e uma próxima pausa sonda de novo (ciclo fresco)."""
+        t = self._tracker_pausado()
+        self.assertEqual(self._action(t), "probe_open")
+        t.probe_phase_since = t.probe_phase_since - datetime.timedelta(
+            seconds=130
+        )
+        self.assertEqual(self._action(t), "probe_close")
+        t.mark_probe_closed()
+        # Carro volta a puxar 2.6 kW
+        t.update(985.5, 2600, 15, 300, efficiency=0.85)
+        self.assertEqual(self._action(t, power_w=2600), "resumed")
+        self.assertEqual(t.state, t.STATE_CHARGING)
+        self.assertFalse(t.is_probing())
+        # Nova pausa mais tarde: sonda de novo
+        t.update(985.5, 0, 15, 300, efficiency=0.85)
+        t.idle_started_at = datetime.datetime.now() - datetime.timedelta(
+            seconds=310
+        )
+        self.assertEqual(self._action(t), "probe_open")
+
+    def test_probe_open_with_manual_reclose_resumes(self):
+        """Usuário religou o relé no meio da fase 'open' e o carro puxou:
+        trata como retomada em vez de religar de novo cegamente."""
+        t = self._tracker_pausado()
+        self.assertEqual(self._action(t), "probe_open")
+        self.assertEqual(self._action(t, power_w=2600), "resumed")
+        self.assertFalse(t.is_probing())
+
+    def test_stop_clears_probe(self):
+        t = self._tracker_pausado()
+        self.assertEqual(self._action(t), "probe_open")
+        self.assertTrue(t.is_probing())
+        t.stop(reason="manual")
+        self.assertFalse(t.is_probing())
+
+    def test_no_decision_before_idle_window(self):
+        """Sem a janela de idle completa, não decide nada (concluir nem
+        sondar) — pausa curta do carro se resolve sozinha."""
+        from dashboard import ChargingTracker
+        t = ChargingTracker()
+        t.start(start_soc=25, target_soc=100, battery_kwh=12.9,
+                start_energy_kwh=979.1)
+        t.update(984.8, 2600, 15, 300, efficiency=0.85)
+        t.update(984.8, 0, 15, 300, efficiency=0.85)  # pausa de 2 min
+        # idle_started_at acabou de começar (janela de 300s não estourou)
+        self.assertIsNone(self._action(t))
+
+    def test_status_message_reflects_probe(self):
+        t = self._tracker_pausado()
+        self.assertEqual(self._action(t), "probe_open")
+        st = t.get_status()
+        self.assertEqual(st["probe_phase"], "open")
+        self.assertIn("relé aberto", st["message"])
+        t.probe_phase_since = t.probe_phase_since - datetime.timedelta(
+            seconds=130
+        )
+        self.assertEqual(self._action(t), "probe_close")
+        t.mark_probe_closed()
+        st = t.get_status()
+        self.assertEqual(st["probe_phase"], "observe")
+        self.assertIn("religado", st["message"])
+
+    def test_default_idle_window_is_300(self):
+        """Janela de idle subiu 120s → 300s (a de 120s matou a carga de
+        ontem aos 62% — pausas de 2+ min são normais)."""
+        import dashboard
+        self.assertEqual(
+            dashboard.DEFAULT_CONFIG["car_charge_idle_seconds_to_stop"], 300
+        )
+
+
+class TestBreakerOffExternalConfirmation(unittest.TestCase):
+    """Tests for breaker_off_externally_confirmed — desligamento externo
+    exige switch=0 E potência idle persistentes.
+
+    Regression: em 2026-09-18 e 2026-09-20 o DPS 16 queimou como False em
+    RAJADA (duas leituras consecutivas ≈ 4 polls, com poll=5s e leitura do
+    breaker=10s) com o carro puxando 2.6-2.7kW. O debounce de 3 polls
+    estourou, a sessão foi finalizada como "desligado externamente" no meio
+    da carga e a auto-detecção abriu outra 6-12s depois — cada carga
+    apareceu em duas linhas na aba Carregamentos (sessões 122+123 e 124+125).
+    """
+
+    def _fn(self):
+        from dashboard import breaker_off_externally_confirmed
+        return breaker_off_externally_confirmed
+
+    def test_switch_off_with_power_flowing_is_not_confirmed(self):
+        """O incidente: streak de switch=0 confirmado mas 2.7kW fluindo —
+        ruído do DPS 16, NÃO um desligamento real."""
+        fn = self._fn()
+        self.assertFalse(fn(off_streak=4, off_idle_streak=0))
+
+    def test_both_streaks_confirmed(self):
+        """Desligamento real: switch e potência caem juntos."""
+        fn = self._fn()
+        self.assertTrue(fn(off_streak=3, off_idle_streak=3))
+
+    def test_power_lag_delays_confirmation(self):
+        """A potência pode levar 1-2 polls para refletir o relé aberto —
+        a confirmação espera os dois critérios."""
+        fn = self._fn()
+        self.assertFalse(fn(off_streak=3, off_idle_streak=2))
+        self.assertTrue(fn(off_streak=4, off_idle_streak=3))
+
+    def test_custom_threshold(self):
+        fn = self._fn()
+        self.assertFalse(fn(5, 4, confirm_polls=5))
+        self.assertTrue(fn(5, 5, confirm_polls=5))
+
+
+class TestReadBreakerStickySwitch(unittest.TestCase):
+    """DPS 16 ausente numa resposta parcial: read_breaker repete o último
+    valor conhecido. Defaultar para False reportava "desligado" com o relé
+    fechado — combustível do finalize falso no meio da carga."""
+
+    def _device(self, dps):
+        d = Mock()
+        d.status.return_value = {"dps": dps}
+        d.updatedps.return_value = {"dps": {}}
+        return d
+
+    def test_missing_dps16_repeats_last_known(self):
+        import dashboard
+        d = self._device({"1": 90000, "16": 1})
+        self.assertTrue(dashboard.read_breaker(d)["switch"])
+        # Resposta parcial: vem sem DPS 16 (comum sob carga)
+        d = self._device({"1": 90001})
+        self.assertTrue(dashboard.read_breaker(d)["switch"])
+
+    def test_present_dps16_updates_state(self):
+        import dashboard
+        d = self._device({"1": 90000, "16": 1})
+        self.assertTrue(dashboard.read_breaker(d)["switch"])
+        # Desligamento de verdade: DPS 16 explícito em 0
+        d = self._device({"1": 90001, "16": 0})
+        self.assertFalse(dashboard.read_breaker(d)["switch"])
+        # E uma parcial depois disso continua desligado
+        d = self._device({"1": 90001})
+        self.assertFalse(dashboard.read_breaker(d)["switch"])
 
 
 if __name__ == "__main__":

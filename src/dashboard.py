@@ -17,7 +17,7 @@ from pathlib import Path
 import os
 
 import tinytuya
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 import uvicorn
 
@@ -75,7 +75,7 @@ DEFAULT_CONFIG = {
     "car_charge_start_kwh": 0,  # Breaker energy counter at charge start
     "car_charge_start_time": None,  # ISO timestamp
     "car_charge_start_soc": None,  # SOC value at charge start
-    "car_charge_idle_seconds_to_stop": 120,  # Wait this long with low power before auto-stop
+    "car_charge_idle_seconds_to_stop": 300,  # Wait this long with low power before auto-stop
     "car_charge_idle_power_w": 15,  # Power threshold to consider "idle/done"
     "car_charge_start_power_w": 500,  # Power threshold to auto-detect charging started
     "car_charge_auto_stop": True,  # Auto-stop when done
@@ -153,20 +153,26 @@ def _sql_kwh(conn, col: str, start: str, end: str, min_avg_w: float = 0.0) -> fl
     return round(row[0] or 0.0, 4)
 
 
-def _kwh_snapshots_plus_missing_days(conn, start: str, end: str) -> float:
+def _kwh_snapshots_plus_missing_days(
+    conn, start: str, end: str, device: str = "fase1", col: str = "power",
+    min_avg_w: float = 0.0,
+) -> float:
     """Month-to-date kWh from daily_snapshots, integrating ONLY days that lack
     a snapshot (today-in-progress or rare gaps).
 
     Snapshots are written once per day by poll_loop's rollover, so completed
     days cost a single indexed lookup instead of a full re-integration — the
     whole-month LAG scan took ~3.4 s on the CubieBoard; this takes ~10 ms.
+
+    Funciona para os dois canais: device='fase1'/col='power' (casa) e
+    device='breaker'/col='phase_c' (carro — usar min_avg_w=1.0 contra ruído).
     """
     snaps = {
         d: (e or 0)
         for d, e in conn.execute(
             "SELECT snapshot_date, energy_kwh FROM daily_snapshots "
-            "WHERE device='fase1' AND snapshot_date>=? AND snapshot_date<?",
-            (start, end),
+            "WHERE device=? AND snapshot_date>=? AND snapshot_date<?",
+            (device, start, end),
         ).fetchall()
     }
     total = sum(snaps.values())
@@ -181,7 +187,7 @@ def _kwh_snapshots_plus_missing_days(conn, start: str, end: str) -> float:
                 (ds, nd),
             ).fetchone()
             if has_readings:
-                total += _sql_kwh(conn, "power", ds, nd)
+                total += _sql_kwh(conn, col, ds, nd, min_avg_w)
         day += timedelta(days=1)
     return round(total, 4)
 
@@ -568,6 +574,7 @@ def read_fase1(d):
 
 
 _last_valid_energy_wh = 0  # cache for DPS 1 communication errors
+_last_breaker_switch = False  # cache for DPS 16 missing from partial responses
 _br_energy_samples = deque(maxlen=200)  # (ts, DPS1 raw) p/ estimar potencia via delta do contador
 
 
@@ -590,7 +597,7 @@ def read_breaker(d):
     """
     import base64 as _b64
 
-    global _last_valid_energy_wh
+    global _last_valid_energy_wh, _last_breaker_switch
     dps = d.status().get("dps", {})
     energy_wh = _to_num(dps.get("1", 0))
     # Fallback: DPS 1 sometimes returns 0 on comms error
@@ -631,8 +638,14 @@ def read_breaker(d):
         if power_w == 0 and dt >= 45 and 0 <= de <= 5000:
             power_w = min(de * 10.0 * 3600.0 / dt, 12000.0)
 
+    # DPS 16 ausente numa resposta parcial (comum sob carga): repetir o
+    # último valor conhecido. Defaultar para False lê "desligado" com o
+    # relé fechado — ver breaker_off_externally_confirmed.
+    if "16" in dps:
+        _last_breaker_switch = bool(dps["16"])
+
     return {
-        "switch": bool(dps.get("16", False)),
+        "switch": bool(_last_breaker_switch),
         "prepayment": bool(dps.get("11", False)),
         "balance_kwh": round(_to_num(dps.get("13", 0)) / 100, 2),
         "energy_kwh": round(energy_wh / 100, 4) if energy_wh else 0,  # raw/100 = kWh (cada raw unit = 10 Wh = 0.01 kWh)
@@ -922,11 +935,18 @@ def update_charge_session_progress(
 
 
 def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="manual",
-                            effective_end_time=None):
+                            effective_end_time=None, charge_complete_confident=False):
     """Mark a charge session as finished. Computes totals. Saves stats for future predictions.
 
     effective_end_time: when the car actually stopped drawing power (excludes
     the idle confirmation tail). Falls back to now() when not provided.
+
+    charge_complete_confident: True quando a parada foi um 'conclude' — o carro
+    PAROU SOZINHO de puxar corrente com energia injetada ≥ 90% do necessário
+    até o alvo. Nesse caso o 100% do carro é a referência REAL de bateria:
+    soc_end é pinado em 100 (a estimativa energética pode ter ficado aquém —
+    sessão 128 terminou "92%" com o carro cheio de verdade) e o soc_start é
+    reconciliado de trás pra frente com o consumo medido.
     """
     conn = get_db()
     try:
@@ -951,6 +971,32 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
             ) * 100
             soc_end = min(100.0, soc_end)
         total_cost = energy_delivered * (cost_per_kwh or 0)
+        eff = load_config().get("car_charge_efficiency", 0.85)
+        eff_aprendida = None
+        # Referência real de carga completa: com a parada confiante, o fim É o
+        # 100% do carro. Aproveitamos a dupla (partida estimada, energia medida)
+        # para aprender a eficiência real grid→bateria — a configurada pode
+        # estar errada (0,85 vs ~0,94 medido), e é ela que faz a estimativa
+        # energética divergir do carro.
+        if (
+            charge_complete_confident
+            and end_reason == "auto"
+            and battery_kwh
+            and energy_delivered >= 2.0
+        ):
+            soc_end = 100.0  # o carro só para sozinho quando encheu de verdade
+            if soc_start is not None and soc_start < 100:
+                eff_learned = (
+                    (100.0 - soc_start) / 100.0 * battery_kwh
+                ) / energy_delivered
+                if 0.70 <= eff_learned <= 1.0:
+                    eff_aprendida = round(eff_learned, 3)
+                    print(
+                        f"🎓 Eficiência real aprendida: {eff:.2f} → {eff_aprendida} "
+                        f"({energy_delivered:.2f} kWh no medidor para "
+                        f"{100.0 - soc_start:.1f}% de bateria)"
+                    )
+                    eff = eff_aprendida
         # Reconciliação do SOC inicial: quando a sessão termina porque o CARRO
         # parou sozinho (end_reason='auto'), o fim é o 100% real da bateria —
         # então o soc_start verdadeiro é 100% − energia entregue ÷ eficiência.
@@ -963,7 +1009,6 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
             and energy_delivered >= 0.5
             and battery_kwh
         ):
-            eff = load_config().get("car_charge_efficiency", 0.85)
             soc_start_real = max(
                 0.0, soc_end - (energy_delivered * eff / max(0.1, battery_kwh)) * 100
             )
@@ -983,6 +1028,8 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
             _cfg_end = load_config()
             _cfg_end["car_current_soc"] = int(soc_end)  # inteiro: piso (conservador)
             _cfg_end["car_current_soc_ts"] = end_dt.isoformat()
+            if eff_aprendida is not None:
+                _cfg_end["car_charge_efficiency"] = eff_aprendida
             save_config(_cfg_end)
         # Sessions that delivered no energy are marked "no_charge" so they
         # don't pollute the Carregamentos tab with phantom entries.
@@ -1129,37 +1176,46 @@ def get_active_charge_session():
         conn.close()
 
 
-def list_charge_sessions(limit=50, include_active=False):
+def list_charge_sessions(limit=50, include_active=False, days=None, since=None):
     """Return recent charge sessions, most recent first.
 
     When `include_active=True`, only the most recent active session is
     returned — invariants in `create_charge_session` guarantee at most one
     live session, but defensive guard in case older "ghost" active rows
     predate the fix.
+
+    Período opcional: `since` (ISO naive local) tem precedência sobre `days`;
+    sem nenhum dos dois não há corte (comportamento antigo). A comparação
+    lexicográfica vale porque os timestamps gravados são ISO local.
     """
+    if since is None and days is not None:
+        since = (datetime.now() - timedelta(days=days)).isoformat()
     conn = get_db()
     try:
+        period_where = " WHERE start_time >= ?" if since is not None else ""
+        period_and = " AND start_time >= ?" if since is not None else ""
+        args = (since, limit) if since is not None else (limit,)
         if include_active:
             rows = conn.execute(
-                """SELECT id, session_uuid, start_time, end_time, status, soc_start, soc_end,
+                f"""SELECT id, session_uuid, start_time, end_time, status, soc_start, soc_end,
                           soc_target, battery_kwh, start_energy_kwh, end_energy_kwh,
                           energy_delivered_kwh, duration_seconds, avg_power_w, cost_per_kwh, total_cost, end_reason
-                   FROM charge_sessions
+                   FROM charge_sessions{period_where}
                    ORDER BY
                        CASE WHEN status = 'active' THEN 0 ELSE 1 END,
                        start_time DESC
                    LIMIT ?""",
-                (limit,),
+                args,
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT id, session_uuid, start_time, end_time, status, soc_start, soc_end,
+                f"""SELECT id, session_uuid, start_time, end_time, status, soc_start, soc_end,
                           soc_target, battery_kwh, start_energy_kwh, end_energy_kwh,
                           energy_delivered_kwh, duration_seconds, avg_power_w, cost_per_kwh, total_cost, end_reason
                    FROM charge_sessions
-                   WHERE status != 'active'
+                   WHERE status != 'active'{period_and}
                    ORDER BY start_time DESC LIMIT ?""",
-                (limit,),
+                args,
             ).fetchall()
         return [
             {
@@ -1187,13 +1243,15 @@ def list_charge_sessions(limit=50, include_active=False):
         conn.close()
 
 
-def charge_sessions_summary(days=90, limit_days=None):
-    """Compute summary stats over recent charge sessions. Accepts `days` or `limit_days`."""
-    if limit_days is None:
-        limit_days = days
+def charge_sessions_summary(days=90, limit_days=None, since=None):
+    """Compute summary stats over recent charge sessions. Accepts `days`,
+    `limit_days` ou `since` (ISO naive local — sobrepõe days, ex. "este mês")."""
+    if since is None:
+        if limit_days is None:
+            limit_days = days
+        since = (datetime.now() - timedelta(days=limit_days)).isoformat()
     conn = get_db()
     try:
-        since = (datetime.now() - timedelta(days=limit_days)).isoformat()
         row = conn.execute(
             """SELECT COUNT(*), COALESCE(SUM(energy_delivered_kwh), 0),
                       COALESCE(SUM(total_cost), 0), COALESCE(SUM(duration_seconds), 0),
@@ -1465,6 +1523,9 @@ def db_today_stats():
     Handles resets automatically since we track power directly.
     All integrals run in SQL (single-row results) instead of pulling every
     reading of the month into Python.
+
+    Custo hoje/mês = (fase1 + disjuntor do carro) × tarifa — circuitos
+    separados, os dois passam pela conta de luz.
     """
     cfg = load_config()
     cost = cfg.get("kwh_cost", 0.956)
@@ -1485,13 +1546,16 @@ def db_today_stats():
         ).fetchone()[0]
 
         # Month-to-date: snapshots-first (cheap); recompute at most every 60 s.
+        # Casa e carro são circuitos SEPARADOS (fase1 não inclui o carro) — o
+        # CUSTO cobre os dois (fase1 + disjuntor), como a conta de luz.
+        has_month = conn.execute(
+            "SELECT 1 FROM readings WHERE device='fase1' AND timestamp>=? LIMIT 1",
+            (month_start,),
+        ).fetchone()
+
         mkey = ("month_kwh", month_start)
         month_kwh = _ttl_get(mkey, 60)
         if month_kwh is None:
-            has_month = conn.execute(
-                "SELECT 1 FROM readings WHERE device='fase1' AND timestamp>=? LIMIT 1",
-                (month_start,),
-            ).fetchone()
             if has_month:
                 month_kwh = _kwh_snapshots_plus_missing_days(conn, month_start, tomorrow)
             else:
@@ -1503,15 +1567,32 @@ def db_today_stats():
                 month_kwh = round(max(0, (row[0] or 0) if row else 0), 4)
             _ttl_put(mkey, month_kwh)
 
+        mkey_br = ("month_kwh_br", month_start)
+        month_br_kwh = _ttl_get(mkey_br, 60)
+        if month_br_kwh is None:
+            if has_month:
+                month_br_kwh = _kwh_snapshots_plus_missing_days(
+                    conn, month_start, tomorrow,
+                    device="breaker", col="phase_c", min_avg_w=1.0,
+                )
+            else:
+                row = conn.execute(
+                    "SELECT SUM(energy_kwh) FROM daily_snapshots WHERE snapshot_date>=? AND device='breaker'",
+                    (month_start,),
+                ).fetchone()
+                month_br_kwh = round(max(0, (row[0] or 0) if row else 0), 4)
+            _ttl_put(mkey_br, month_br_kwh)
+
         return {
             "today_kwh": today_kwh,
-            "today_cost": round(today_kwh * cost, 2),
+            "today_cost": round((today_kwh + breaker_kwh) * cost, 2),
             "month_kwh": round(month_kwh, 4),
-            "month_cost": round(month_kwh * cost, 2),
+            "month_cost": round((month_kwh + month_br_kwh) * cost, 2),
             "kwh_cost": cost,
             "source": "local",
             "readings": count,
             "breaker_kwh": breaker_kwh,
+            "month_breaker_kwh": round(month_br_kwh, 4),
         }
     finally:
         conn.close()
@@ -1655,7 +1736,8 @@ def db_hourly(date=None):
         ).fetchall()
 
         if not rows:
-            return {"date": date, "hours": [], "total_kwh": 0, "source": "local"}
+            return {"date": date, "hours": [], "total_kwh": 0, "breaker_kwh": 0.0,
+                    "total_cost": 0, "source": "local"}
 
         by_hour = {r[0]: r for r in rows}
 
@@ -1683,11 +1765,14 @@ def db_hourly(date=None):
 
         cfg = load_config()
         cost = cfg.get("kwh_cost", 0.956)
+        # Custo do dia cobre os DOIS circuitos: casa (fase1) + carro (breaker).
+        breaker_kwh = _sql_kwh(conn, "phase_c", date, next_day, min_avg_w=1.0)
         return {
             "date": date,
             "hours": hours,
             "total_kwh": round(total_kwh, 4),
-            "total_cost": round(total_kwh * cost, 2),
+            "breaker_kwh": round(breaker_kwh, 4),
+            "total_cost": round((total_kwh + breaker_kwh) * cost, 2),
             "source": "local",
         }
     finally:
@@ -1725,16 +1810,31 @@ class ChargingTracker:
         2. While CHARGING, we keep measuring energy delta + power draw
         3. When power drops to idle → state = COMPLETING
         4. We wait car_charge_idle_seconds_to_stop to confirm the car really stopped
-        5. Then turn breaker OFF → stop() → state = IDLE (ready for the next
+        5. auto_stop_action() then decides HOW to end, using the energy already
+           injected as the tie-breaker (pausa do carro ≠ carga completa):
+           - energy delivered ≈ what's needed to reach the target → 'conclude'
+             (car is full — open the breaker and finalize);
+           - little energy injected → the pause may be transient (BMS
+             balancing, charger thermal, renegotiation): 'probe_open' opens
+             the relay for PROBE_OPEN_SECONDS, 'probe_close' re-closes it and
+             the poll loop observes — car resumes ('resumed') → back to
+             CHARGING; still zero after the idle window → 'probe_conclude'.
+        6. Then turn breaker OFF → stop() → state = IDLE (ready for the next
            session — auto-detect only fires from IDLE, so "done" must not linger)
-        6. If power comes back during COMPLETING, we go back to CHARGING and
-           KEEP the breaker ON (car is balancing / equalising / not yet full)
     """
 
     STATE_IDLE = "idle"
     STATE_CHARGING = "charging"
     STATE_COMPLETING = "completing"  # target reached, waiting for car to stop pulling
     STATE_ERROR = "error"
+
+    # Duração da fase "relé aberto" da sonda de retomada. Passado esse tempo
+    # sem retomada, o relé é religado e a observação começa (ver lifecycle 5).
+    PROBE_OPEN_SECONDS = 120
+    # Fração da energia necessária até o alvo (alvo − SOC inicial, com
+    # eficiência) que já garante carga completa: "quase 100% injetado"
+    # dispensa a sonda. Abaixo disso, uma pausa pode ser só uma pausa.
+    CONFIDENT_ENERGY_FRACTION = 0.9
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -1759,8 +1859,13 @@ class ChargingTracker:
         # Last moment the car was actually drawing power (above idle threshold).
         # Used to compute effective charging duration excluding the idle tail.
         self.last_active_time = None
-        self.idle_seconds_needed = 120  # updated every poll from config
+        self.idle_seconds_needed = 300  # updated every poll from config
         self.efficiency = 0.80  # grid→battery efficiency, updated from config
+        # Sonda de retomada (ver lifecycle): 'none' | 'open' (relé aberto,
+        # aguardando PROBE_OPEN_SECONDS) | 'observe' (relé religado, aguardando
+        # o carro retomar ou estourar a janela de idle).
+        self.probe_phase = "none"
+        self.probe_phase_since = None
 
     def start(
         self, start_soc, target_soc, battery_kwh, start_energy_kwh, session_uuid=None
@@ -1783,6 +1888,8 @@ class ChargingTracker:
             self.power_sum = 0.0
             self.power_count = 0
             self.last_active_time = None
+            self.probe_phase = "none"
+            self.probe_phase_since = None
 
     def stop(self, reason="manual"):
         """End the session and return to IDLE unconditionally.
@@ -1809,6 +1916,8 @@ class ChargingTracker:
             self.power_sum = 0.0
             self.power_count = 0
             self.last_active_time = None
+            self.probe_phase = "none"
+            self.probe_phase_since = None
 
     def apply_soc_correction(self, new_soc):
         """User corrected the SOC mid-session (dashboard input).
@@ -1941,6 +2050,125 @@ class ChargingTracker:
             elapsed = (datetime.now() - self.idle_started_at).total_seconds()
             return elapsed >= idle_seconds_needed
 
+    def is_probing(self):
+        """True enquanto a sonda de retomada está em curso.
+
+        Enquanto True, o ramo "Breaker desligado externamente" do poll_loop
+        NÃO pode finalizar a sessão: o relé está aberto por decisão nossa
+        (fase 'open'), não por ação externa.
+        """
+        return self.probe_phase != "none"
+
+    def _reset_probe_locked(self):
+        self.probe_phase = "none"
+        self.probe_phase_since = None
+
+    def _charge_complete_confident_locked(self):
+        """A energia já injetada cobre o que faltava até o alvo?
+
+        Necessária (na rede) = (alvo − SOC inicial)/100 × bateria ÷ eficiência.
+        Com ≥ CONFIDENT_ENERGY_FRACTION disso injetado, o carro só pode ter
+        parado porque encheu — conclui sem sonda. Com pouca energia injetada
+        NÃO dá para concluir: pode ser pausa transitória OU o carro pode ter
+        começado com SOC real maior que a estimativa (a estimativa erra para
+        baixo) — nesses casos a sonda decide.
+        """
+        needed_grid_kwh = (
+            (max(0.0, self.target_soc - self.start_soc) / 100.0)
+            * self.battery_kwh
+            / max(0.1, self.efficiency)
+        )
+        if needed_grid_kwh <= 0:
+            return True  # começou no alvo ou além
+        delivered = max(0.0, self.last_energy_kwh - self.start_energy_kwh)
+        return delivered >= self.CONFIDENT_ENERGY_FRACTION * needed_grid_kwh
+
+    def mark_probe_closed(self):
+        """Relé religado após a fase 'open' — começa a observação."""
+        with self.lock:
+            if self.probe_phase == "open":
+                self.probe_phase = "observe"
+                self.probe_phase_since = datetime.now()
+                self.message = "Sonda: relé religado — aguardando o carro retomar"
+
+    def auto_stop_action(
+        self, power_w, idle_power_w, idle_seconds_needed, resume_power_w,
+        probe_open_seconds=None,
+    ):
+        """Decide o próximo passo quando a potência caiu ao idle.
+
+        Retorna uma das ações para o poll_loop executar:
+            'conclude'       carga completa confirmada — abre o relé e finaliza
+            'probe_open'     pausa longe do alvo — abre o relé por
+                             probe_open_seconds e torna a avaliar
+            'probe_close'    fim da fase 'open' — religa o relé e observa
+            'resumed'        carro voltou a carregar durante a sonda — segue
+                             a sessão (tracker já está em CHARGING)
+            'probe_conclude' carro não retomou na observação — desliga e finaliza
+            None             nada a fazer neste poll
+
+        Chamar em TODO poll enquanto a sessão vive, inclusive com o relé
+        aberto pela própria sonda (switch=0) — é a única forma de a fase
+        'open' chegar ao fim. Nenhum sleep: as transições são por timestamp,
+        o loop de coleta nunca bloqueia.
+        """
+        with self.lock:
+            if self.state not in (self.STATE_CHARGING, self.STATE_COMPLETING):
+                return None
+            now = datetime.now()
+            if probe_open_seconds is None:
+                probe_open_seconds = self.PROBE_OPEN_SECONDS
+
+            # ── Sonda em curso ──
+            if self.probe_phase == "open":
+                if power_w >= resume_power_w:
+                    # Alguém religou o relé por fora e o carro voltou a puxar:
+                    # trata como retomada.
+                    self._reset_probe_locked()
+                    self.state = self.STATE_CHARGING
+                    self.idle_started_at = None
+                    self.message = "Carro voltou a consumir durante a sonda"
+                    return "resumed"
+                if self.probe_phase_since and (
+                    (now - self.probe_phase_since).total_seconds()
+                    >= probe_open_seconds
+                ):
+                    return "probe_close"
+                return None
+            if self.probe_phase == "observe":
+                if power_w >= resume_power_w:
+                    # Carro retomou após o religamento — a pausa era
+                    # transitória; segue a carga (próxima pausa sonda de novo).
+                    self._reset_probe_locked()
+                    self.state = self.STATE_CHARGING
+                    self.idle_started_at = None
+                    self.message = "Carro retomou a carga — sonda concluída"
+                    return "resumed"
+                if self.probe_phase_since and (
+                    (now - self.probe_phase_since).total_seconds()
+                    >= idle_seconds_needed
+                ):
+                    return "probe_conclude"
+                return None
+
+            # ── Sem sonda: exige a janela de idle inteira antes de decidir ──
+            if self.state != self.STATE_COMPLETING or not self.idle_started_at:
+                return None
+            elapsed = (now - self.idle_started_at).total_seconds()
+            if elapsed < idle_seconds_needed:
+                return None
+            if self._charge_complete_confident_locked():
+                return "conclude"
+            # Pausa com energia muito abaixo do necessário: BMS/balanceamento,
+            # térmica do carregador ou renegociação — sondar antes de desligar.
+            self.probe_phase = "open"
+            self.probe_phase_since = now
+            self.message = (
+                "Pausa com carga incompleta — testando retomada "
+                f"(relé abre por {probe_open_seconds}s)"
+            )
+            return "probe_open"
+
     def get_status(self):
         with self.lock:
             if self.state == self.STATE_IDLE or not self.start_time:
@@ -1999,6 +2227,24 @@ class ChargingTracker:
                         message = f"Confirmando carga completa... {remaining}s"
                     else:
                         message = f"Pronto para desligar ({int(idle_seconds)}s idle)"
+            # Sonda em curso tem precedência na mensagem: o relé está aberto
+            # (ou recém-religado) por decisão nossa, não é fim de carga.
+            if self.probe_phase == "open":
+                remaining = 0
+                if self.probe_phase_since:
+                    remaining = max(
+                        0,
+                        int(
+                            self.PROBE_OPEN_SECONDS
+                            - (now - self.probe_phase_since).total_seconds()
+                        ),
+                    )
+                message = (
+                    f"Pausa detectada — testando retomada "
+                    f"(relé aberto, religa em {remaining}s)"
+                )
+            elif self.probe_phase == "observe":
+                message = "Testando retomada: relé religado, aguardando o carro"
 
             return {
                 "state": self.state,
@@ -2015,6 +2261,7 @@ class ChargingTracker:
                 "target_reached": self.effective_soc >= self.target_soc,
                 "idle_seconds": int(idle_seconds),
                 "idle_seconds_needed": self.idle_seconds_needed,
+                "probe_phase": self.probe_phase,
                 "current_power_w": self.last_power_w,
             }
 
@@ -2074,6 +2321,22 @@ def breaker_off_confirmed(off_streak, confirm_polls=3):
     de um desligamento real.
     """
     return off_streak >= confirm_polls
+
+
+def breaker_off_externally_confirmed(off_streak, off_idle_streak, confirm_polls=3):
+    """True quando o desligamento externo está confirmado por DOIS critérios.
+
+    switch=0 persistente (off_streak) E potência abaixo do idle persistente
+    (off_idle_streak). O segundo critério existe porque o DPS 16 queima como
+    False em RAJADA com o relé fechado: nos incidentes de 2026-09-18 e
+    2026-09-20, duas leituras consecutivas corrompidas viraram 4 polls do
+    loop (poll=5s, leitura do breaker=10s), estouraram o debounce de 3 e a
+    sessão foi finalizada no meio da carga com ~2.7kW fluindo — a
+    auto-detecção abriu outra 6-12s depois e a carga apareceu em duas
+    linhas na aba Carregamentos. Relé aberto de verdade corta a potência
+    junto; switch=0 com potência alta é ruído, não desligamento.
+    """
+    return off_streak >= confirm_polls and off_idle_streak >= confirm_polls
 
 
 # ─── Poll loop ──────────────────────────────────────────────────
@@ -2150,6 +2413,12 @@ def poll_loop():
     # Uma leitura isolada de 0 costuma ser ruído de comunicação (ver
     # breaker_off_confirmed), não um desligamento real.
     breaker_off_streak = 0
+
+    # Streak do desligamento REAL: switch=0 E potência abaixo do idle no
+    # mesmo poll (ver breaker_off_externally_confirmed). O DPS 16 queima
+    # como False em rajada com o relé fechado; sem o critério de potência,
+    # o finalize falso partia a sessão em duas linhas no meio da carga.
+    breaker_off_idle_streak = 0
 
     # Backfill inicial: roda 1x por instalação (gate em snapshots_backfilled),
     # corrigindo placeholders antigos (0.001 / cumulativo) por integrais reais
@@ -2250,22 +2519,36 @@ def poll_loop():
             cfg = load_config()
             cfg_start_power_w = cfg.get("car_charge_start_power_w", 500)
 
+            # Streak de "switch=0 com potência idle": um desligamento real
+            # abre o relé E corta o consumo juntos. Ruído do DPS 16 (switch=0
+            # com o carro puxando 2.7kW) falha no critério de potência e não
+            # conta — é o que impede o finalize falso no meio da carga.
+            if (
+                br
+                and not br_switch_on
+                and br_power_w <= cfg.get("car_charge_idle_power_w", 15)
+            ):
+                breaker_off_idle_streak += 1
+            else:
+                breaker_off_idle_streak = 0
+
             # ── Charging tracker update + auto-stop check ──
             if charging.state in (
                 ChargingTracker.STATE_CHARGING,
                 ChargingTracker.STATE_COMPLETING,
             ):
-                if (
-                    br is not None
-                    and not br_switch_on
-                    and breaker_off_confirmed(breaker_off_streak)
-                ):
+                if breaker_off_externally_confirmed(
+                    breaker_off_streak, breaker_off_idle_streak
+                ) and not charging.is_probing():
                     # Breaker was turned OFF externally (physical switch / fault)
                     # while a session was active → finalize it now instead of
-                    # leaving a ghost "active" session in the DB. Exige
-                    # confirmação em polls consecutivos: uma leitura isolada
-                    # de switch=0 com potência fluindo é ruído de comunicação
-                    # do DPS 16, não um desligamento real.
+                    # leaving a ghost "active" session in the DB. Exige DOIS
+                    # critérios persistentes: switch=0 E potência idle em polls
+                    # consecutivos — leitura de switch=0 com potência fluindo é
+                    # ruído de comunicação do DPS 16, não um desligamento real
+                    # (incidentes de 2026-09-18 e 2026-09-20). Durante a sonda
+                    # de retomada o relé está aberto POR CONTA DO PRÓPRIO
+                    # serviço — is_probing() impede o finalize aqui.
                     print(
                         "🔌 Breaker desligado externamente durante sessão — finalizando"
                     )
@@ -2277,66 +2560,162 @@ def poll_loop():
                             end_reason="manual",
                             effective_end_time=charging.effective_end_time,
                         )
+                        # finalize gravou car_current_soc no config; recarregar
+                        # para o save_config abaixo não reverter a escrita com
+                        # o dict velho do cache de 2s (lost update).
+                        cfg = load_config()
                     charging.stop(reason="manual")
                     cfg["car_charging"] = False
                     cfg["car_charge_start_time"] = None
                     save_config(cfg)
-                elif br is not None and br_switch_on:
-                    # Session active and breaker ON — feed latest readings.
-                    charging.update(
-                        current_energy_kwh=br.get("energy_kwh", 0),
-                        current_power_w=br_power_w,
-                        idle_power_w=cfg.get("car_charge_idle_power_w", 15),
-                        idle_seconds_needed=cfg.get(
-                            "car_charge_idle_seconds_to_stop", 120
-                        ),
-                        efficiency=cfg.get("car_charge_efficiency", 0.80),
-                    )
-                    # Persist progress to DB (every ~10s)
-                    if charging.session_uuid and charging.start_time:
-                        # Effective duration excludes the idle confirmation tail
-                        eff_end = charging.effective_end_time
-                        elapsed = (eff_end - charging.start_time).total_seconds()
-                        update_charge_session_progress(
-                            charging.session_uuid,
+                else:
+                    # Sessão viva: alimenta o tracker com relé ON (inclusive
+                    # na fase 'observe' da sonda) e roda a decisão de
+                    # auto-stop em TODO poll — inclusive com o relé aberto
+                    # pela própria sonda (fase 'open', switch=0), senão a
+                    # sonda nunca chega ao fim.
+                    if br is not None and br_switch_on:
+                        # Session active and breaker ON — feed latest readings.
+                        charging.update(
                             current_energy_kwh=br.get("energy_kwh", 0),
-                            current_soc=charging.effective_soc,
-                            duration_seconds=int(max(0, elapsed)),
-                            avg_power_w=charging.session_avg_power_w,
+                            current_power_w=br_power_w,
+                            idle_power_w=cfg.get("car_charge_idle_power_w", 15),
+                            idle_seconds_needed=cfg.get(
+                                "car_charge_idle_seconds_to_stop", 300
+                            ),
+                            efficiency=cfg.get("car_charge_efficiency", 0.80),
                         )
-                    # Auto-stop when the car finished (idle confirmed) and allowed
-                    if cfg.get(
-                        "car_charge_auto_stop", True
-                    ) and charging.should_auto_stop(
-                        cfg.get("car_charge_idle_seconds_to_stop", 120)
-                    ):
-                        print(
-                            "🔌 Auto-stopping breaker (charge complete, idle confirmed)"
-                        )
-                        try:
-                            d_brk = connect_device(DEVICES["breaker"])
-                            d_brk.set_value(BREAKER_SWITCH_DPS, False)
-                            time.sleep(1)
-                            state.update("breaker", read_breaker(d_brk))
-                            # Finalize DB session
-                            if charging.session_uuid:
-                                with state.lock:
-                                    br_end = state.latest.get("breaker", {})
-                                end_energy = (
-                                    br_end.get("energy_kwh", 0) if br_end else 0
+                        # Persist progress to DB (every ~10s)
+                        if charging.session_uuid and charging.start_time:
+                            # Effective duration excludes the idle confirmation tail
+                            eff_end = charging.effective_end_time
+                            elapsed = (
+                                eff_end - charging.start_time
+                            ).total_seconds()
+                            update_charge_session_progress(
+                                charging.session_uuid,
+                                current_energy_kwh=br.get("energy_kwh", 0),
+                                current_soc=charging.effective_soc,
+                                duration_seconds=int(max(0, elapsed)),
+                                avg_power_w=charging.session_avg_power_w,
+                            )
+
+                    # ── Fim de carga: concluir ou sondar retomada? ──
+                    # Incidente de 2026-09-22 (sessão 126): o carro pausou aos
+                    # 62% e a janela de idle leu "carga completa" — o serviço
+                    # abriu o relé e a carga morreu com alvo em 100%. Agora a
+                    # energia injetada decide: perto do necessário → conclui;
+                    # muito abaixo → sonda (abre 120s, religa, observa).
+                    # Roda com relé ON OU com sonda em curso (fase 'open' tem
+                    # switch=0); sem breaker algum, decidir às cegas só
+                    # inflamaria reconnect a cada poll.
+                    if (br is not None and br_switch_on) or charging.is_probing():
+                        if cfg.get("car_charge_auto_stop", True):
+                            action = charging.auto_stop_action(
+                                power_w=br_power_w,
+                                idle_power_w=cfg.get("car_charge_idle_power_w", 15),
+                                idle_seconds_needed=cfg.get(
+                                    "car_charge_idle_seconds_to_stop", 300
+                                ),
+                                resume_power_w=cfg_start_power_w,
+                            )
+                            if action == "conclude":
+                                print(
+                                    "🔌 Auto-stopping breaker (charge complete, idle confirmed)"
                                 )
-                                finalize_charge_session(
-                                    charging.session_uuid,
-                                    end_energy_kwh=end_energy,
-                                    soc_end=charging.effective_soc,
-                                    end_reason="auto",
-                                    effective_end_time=charging.effective_end_time,
+                                try:
+                                    d_brk = connect_device(DEVICES["breaker"])
+                                    d_brk.set_value(BREAKER_SWITCH_DPS, False)
+                                    time.sleep(1)
+                                    state.update("breaker", read_breaker(d_brk))
+                                    # Finalize DB session
+                                    if charging.session_uuid:
+                                        with state.lock:
+                                            br_end = state.latest.get("breaker", {})
+                                        end_energy = (
+                                            br_end.get("energy_kwh", 0) if br_end else 0
+                                        )
+                                        finalize_charge_session(
+                                            charging.session_uuid,
+                                            end_energy_kwh=end_energy,
+                                            soc_end=charging.effective_soc,
+                                            end_reason="auto",
+                                            effective_end_time=charging.effective_end_time,
+                                            charge_complete_confident=True,
+                                        )
+                                        # finalize gravou car_current_soc (e talvez
+                                        # a eficiência aprendida) no config;
+                                        # recarregar para o save_config abaixo não
+                                        # reverter a escrita com o dict velho do
+                                        # cache de 2s.
+                                        cfg = load_config()
+                                    charging.stop(reason="auto")
+                                    cfg["car_charging"] = False
+                                    save_config(cfg)
+                                except Exception as e:
+                                    print(f"Auto-stop error: {e}")
+                            elif action == "probe_open":
+                                print(
+                                    "🔌 Sonda de retomada: carga incompleta + pausa — "
+                                    "abrindo relé por 120s"
                                 )
-                            charging.stop(reason="auto")
-                            cfg["car_charging"] = False
-                            save_config(cfg)
-                        except Exception as e:
-                            print(f"Auto-stop error: {e}")
+                                try:
+                                    d_brk = connect_device(DEVICES["breaker"])
+                                    d_brk.set_value(BREAKER_SWITCH_DPS, False)
+                                    time.sleep(1)
+                                    state.update("breaker", read_breaker(d_brk))
+                                except Exception as e:
+                                    print(f"Probe breaker-off error: {e}")
+                            elif action == "probe_close":
+                                print(
+                                    "🔌 Sonda de retomada: religando o relé — "
+                                    "aguardando o carro"
+                                )
+                                try:
+                                    d_brk = connect_device(DEVICES["breaker"])
+                                    d_brk.set_value(BREAKER_SWITCH_DPS, True)
+                                    time.sleep(1)
+                                    state.update("breaker", read_breaker(d_brk))
+                                    charging.mark_probe_closed()
+                                except Exception as e:
+                                    print(f"Probe breaker-on error: {e}")
+                            elif action == "probe_conclude":
+                                print(
+                                    "🔌 Sonda de retomada: carro não voltou a "
+                                    "carregar — desligando e concluindo a sessão"
+                                )
+                                try:
+                                    d_brk = connect_device(DEVICES["breaker"])
+                                    d_brk.set_value(BREAKER_SWITCH_DPS, False)
+                                    time.sleep(1)
+                                    state.update("breaker", read_breaker(d_brk))
+                                    if charging.session_uuid:
+                                        with state.lock:
+                                            br_end = state.latest.get("breaker", {})
+                                        end_energy = (
+                                            br_end.get("energy_kwh", 0) if br_end else 0
+                                        )
+                                        # SEM charge_complete_confident: a sonda
+                                        # só prova que o carro não retomou — não
+                                        # que ele encheu. soc_end fica na
+                                        # estimativa energética.
+                                        finalize_charge_session(
+                                            charging.session_uuid,
+                                            end_energy_kwh=end_energy,
+                                            soc_end=charging.effective_soc,
+                                            end_reason="auto",
+                                            effective_end_time=charging.effective_end_time,
+                                        )
+                                        # finalize gravou car_current_soc no
+                                        # config; recarregar para o save_config
+                                        # abaixo não reverter a escrita.
+                                        cfg = load_config()
+                                    charging.stop(reason="auto")
+                                    cfg["car_charging"] = False
+                                    save_config(cfg)
+                                except Exception as e:
+                                    print(f"Probe conclude error: {e}")
+                            # 'resumed' e None: nada a fazer neste poll
                 # else: sem dados do breaker, ou switch=0 ainda não confirmado
                 # (possível ruído de comunicação) → pula este ciclo e reavalia
                 # no próximo poll.
@@ -2353,7 +2732,7 @@ def poll_loop():
                 )
                 if not session_active:
                     idle_w = cfg.get("car_charge_idle_power_w", 15)
-                    idle_s = cfg.get("car_charge_idle_seconds_to_stop", 120)
+                    idle_s = cfg.get("car_charge_idle_seconds_to_stop", 300)
                     if br_power_w <= idle_w:
                         if breaker_idle_since is None:
                             breaker_idle_since = datetime.now()
@@ -2516,6 +2895,9 @@ def db_monthly_stats(year: int, month: int):
     day rollover); only days without a snapshot (today / gaps) get integrated
     via SQL. A full re-integration took ~3.4 s on the CubieBoard; this is
     ~10 ms of lookups plus one single-day integral.
+
+    total_cost = (fase1 + breaker) × tarifa — circuitos separados; o kWh
+    total continua só da casa (fase1), com o carro exposto à parte.
     """
     cfg = load_config()
     cost = cfg.get("kwh_cost", 0.956)
@@ -2560,12 +2942,17 @@ def db_monthly_stats(year: int, month: int):
             day += timedelta(days=1)
 
         total_kwh = round(sum(d["kwh"] for d in daily), 4)
+        # Custo total cobre os DOIS circuitos: casa (fase1) + carro (breaker).
+        breaker_kwh = _kwh_snapshots_plus_missing_days(
+            conn, first, last, device="breaker", col="phase_c", min_avg_w=1.0,
+        )
 
         return {
             "year": year,
             "month": month,
             "total_kwh": total_kwh,
-            "total_cost": round(total_kwh * cost, 2),
+            "breaker_kwh": round(breaker_kwh, 4),
+            "total_cost": round((total_kwh + breaker_kwh) * cost, 2),
             "daily": daily,
             "source": "local",
         }
@@ -2836,18 +3223,40 @@ def api_charge_state():
 
 
 @app.get("/api/charge/sessions")
-def api_charge_sessions(limit: int = 50, include_active: bool = False):
+def api_charge_sessions(limit: int = 50, include_active: bool = False,
+                        days: int = None, since: str = None):
     """List recent charge sessions."""
+    if days is not None:
+        # Clamp como api_daily_history (days negativo cortaria no futuro).
+        # 9999 = todo o histórico ("Tudo" no frontend).
+        days = max(1, min(days, 9999))
+    if since is not None:
+        try:
+            datetime.fromisoformat(since)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="Parâmetro 'since' inválido (ISO esperado)."
+            )
     return {
-        "sessions": list_charge_sessions(limit=limit, include_active=include_active),
+        "sessions": list_charge_sessions(limit=limit, include_active=include_active,
+                                         days=days, since=since),
         "active": get_active_charge_session(),
     }
 
 
 @app.get("/api/charge/summary")
-def api_charge_summary(days: int = 90):
+def api_charge_summary(days: int = 90, since: str = None):
     """Summary of charge sessions over the period."""
-    return charge_sessions_summary(days=days)
+    # Clamp como api_daily_history; 9999 = todo o histórico ("Tudo").
+    days = max(1, min(days, 9999))
+    if since is not None:
+        try:
+            datetime.fromisoformat(since)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="Parâmetro 'since' inválido (ISO esperado)."
+            )
+    return charge_sessions_summary(days=days, since=since)
 
 
 @app.get("/api/car/status")

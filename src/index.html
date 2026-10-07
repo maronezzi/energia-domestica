@@ -41,6 +41,8 @@
         .si-label{font-size:.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
         .si-val{font-size:1.5rem;font-weight:700;margin-top:.1rem}
         .si-unit{font-size:.85rem;font-weight:400;color:var(--dim)}
+        .status-item>div{min-width:0}
+        .si-sub{font-size:.68rem;color:var(--dim);margin-top:.12rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
         /* Cards */
         .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:1.5rem;margin-bottom:1.5rem;position:relative;overflow:hidden}
@@ -226,10 +228,14 @@
         .sum-card .lbl{font-size:.75rem;color:var(--dim);text-transform:uppercase;margin-top:.3rem}
         .sum-card .sub{font-size:.8rem;color:var(--dim);margin-top:.2rem}
 
-        .hourly-stats{display:flex;gap:1rem;margin-bottom:1rem}
+        .hourly-stats{display:flex;gap:1rem;margin-bottom:1rem;transition:opacity .2s}
         .hourly-stat{flex:1;text-align:center;border-radius:8px;padding:.8rem}
         .hourly-stat .hv{font-size:1.5rem;font-weight:700}
         .hourly-stat .hl{font-size:.7rem;color:var(--dim)}
+        .hly-nav{background:var(--card);border:1px solid var(--border);color:var(--text);padding:.4rem .7rem;border-radius:6px;cursor:pointer;font-size:.85rem;font-weight:600}
+        .hly-nav:hover:not(:disabled){border-color:var(--accent)}
+        .hly-nav:disabled{opacity:.35;cursor:default}
+        .hly-nav.live{background:rgba(0,212,170,.12);border-color:var(--accent);color:var(--accent)}
 
         .table-card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
         .table-card h3{font-size:.9rem;padding:1rem 1.2rem;color:var(--dim);border-bottom:1px solid var(--border)}
@@ -295,12 +301,12 @@
 <div id="tab-dashboard" class="tab-content active">
 
     <div class="status-bar">
-        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">⚡</div><div><div class="si-label">Consumo</div><div class="si-val"><span id="vPower">—</span> <span class="si-unit">W</span></div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(59,130,246,.15)">🔌</div><div><div class="si-label">Tensão</div><div class="si-val"><span id="vVoltage">—</span> <span class="si-unit">V</span></div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">🔋</div><div><div class="si-label">Corrente</div><div class="si-val"><span id="vCurrent">—</span> <span class="si-unit">A</span></div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">📊</div><div><div class="si-label">Energia hoje</div><div class="si-val"><span id="vEnergy">—</span> <span class="si-unit">kWh</span></div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">💰</div><div><div class="si-label">Custo Mês</div><div class="si-val" style="color:var(--ok)" id="vMonthCost">R$ —</div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">📅</div><div><div class="si-label">Custo Hoje</div><div class="si-val" style="color:var(--warn)" id="vTodayCost">R$ —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">⚡</div><div><div class="si-label" title="Instantâneo: casa (fase 1) + carro (disjuntor)">Consumo</div><div class="si-val"><span id="vPower">—</span> <span class="si-unit">W</span></div><div class="si-sub" id="vPowerSub">casa — · carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(59,130,246,.15)">🔌</div><div><div class="si-label" title="Os dois medidores estão na mesma fase — tensão não se soma; a linha de baixo mostra cada um">Tensão</div><div class="si-val"><span id="vVoltage">—</span> <span class="si-unit">V</span></div><div class="si-sub" id="vVoltageSub">casa — · carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">🔋</div><div><div class="si-label" title="Soma: casa (fase 1) + carro (disjuntor), mesma fase">Corrente</div><div class="si-val"><span id="vCurrent">—</span> <span class="si-unit">A</span></div><div class="si-sub" id="vCurrentSub">casa — · carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">📊</div><div><div class="si-label" title="Energia consumida hoje: casa (fase 1) + carro (disjuntor)">Energia hoje</div><div class="si-val"><span id="vEnergy">—</span> <span class="si-unit">kWh</span></div><div class="si-sub" id="vEnergySub">casa — · carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">💰</div><div><div class="si-label" title="Casa (fase 1) + carro (disjuntor) × tarifa">Custo Mês</div><div class="si-val" style="color:var(--ok)" id="vMonthCost">R$ —</div><div class="si-sub" id="vMonthCostSub">casa — · carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">📅</div><div><div class="si-label" title="Casa (fase 1) + carro (disjuntor) × tarifa">Custo Hoje</div><div class="si-val" style="color:var(--warn)" id="vTodayCost">R$ —</div><div class="si-sub" id="vTodayCostSub">casa — · carro —</div></div></div>
     </div>
 
     <div class="ev-cards-row">
@@ -525,8 +531,8 @@
 
     <!-- Realtime charts -->
     <div class="charts-grid">
-        <div class="chart-card"><h3>📈 Potência (W) — últimos 10min</h3><div class="chart-box"><canvas id="chartPower"></canvas></div></div>
-        <div class="chart-card"><h3>🔋 Energia Acumulada — hoje (kWh)</h3><div class="chart-box"><canvas id="chartEnergy"></canvas></div></div>
+        <div class="chart-card"><h3>📈 Potência total (W) — últimos 10min</h3><div class="chart-box"><canvas id="chartPower"></canvas></div></div>
+        <div class="chart-card"><h3>🔋 Energia Acumulada hoje — casa + carro (kWh)</h3><div class="chart-box"><canvas id="chartEnergy"></canvas></div></div>
     </div>
 </div>
 
@@ -540,7 +546,7 @@
 
     <div class="summary">
         <div class="sum-card"><div class="big" id="hKwh">—</div><div class="lbl">kWh Consumidos</div><div class="sub">no mês</div></div>
-        <div class="sum-card"><div class="big cur" id="hCost">—</div><div class="lbl">Custo Total</div><div class="sub" id="hCostKwh">—</div></div>
+        <div class="sum-card"><div class="big cur" id="hCost">—</div><div class="lbl" title="Casa (fase 1) + carro (disjuntor) × tarifa">Custo Total</div><div class="sub" id="hCostKwh">—</div></div>
         <div class="sum-card"><div class="big" id="hDays">—</div><div class="lbl">Dias</div></div>
         <div class="sum-card"><div class="big" id="hAvg">—</div><div class="lbl">Média/Dia</div><div class="sub" id="hAvgCost">—</div></div>
     </div>
@@ -552,14 +558,18 @@
     <div class="chart-card" style="margin-bottom:1.5rem">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
             <h3>⏰ Consumo Hora a Hora</h3>
-            <div style="display:flex;gap:.5rem;align-items:center">
-                <input type="date" id="hourlyDate" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:.4rem .6rem;border-radius:6px;font-size:.85rem" onchange="loadHourly()">
-                <button onclick="loadHourly()" style="background:var(--accent);border:none;color:var(--bg);padding:.4rem .8rem;border-radius:6px;cursor:pointer;font-weight:600">🔄</button>
+            <div style="display:flex;gap:.4rem;align-items:center">
+                <button id="hlyPrev" class="hly-nav" onclick="shiftHourlyDay(-1)" title="Dia anterior">◀</button>
+                <button id="hlyDateBtn" class="hly-nav" onclick="openHourlyPicker()" title="Escolher data" style="min-width:7.4rem;text-align:center">—</button>
+                <input type="date" id="hourlyDate" tabindex="-1" aria-hidden="true" style="position:absolute;opacity:0;pointer-events:none;width:1px;height:1px" onchange="onHourlyDateChange()">
+                <button id="hlyNext" class="hly-nav" onclick="shiftHourlyDay(1)" title="Próximo dia">▶</button>
+                <button id="hlyToday" class="hly-nav" onclick="gotoHourlyToday()" title="Voltar para hoje">Hoje</button>
+                <button class="hly-nav" style="background:var(--accent);border-color:var(--accent);color:var(--bg)" onclick="loadHourly()" title="Atualizar">🔄</button>
             </div>
         </div>
         <div class="hourly-stats">
             <div class="hourly-stat" style="background:rgba(0,212,170,.1)"><div class="hv" style="color:var(--accent)" id="hlyTotal">—</div><div class="hl">kWh no dia</div></div>
-            <div class="hourly-stat" style="background:rgba(34,197,94,.1)"><div class="hv" style="color:var(--ok)" id="hlyCost">—</div><div class="hl">Custo</div></div>
+            <div class="hourly-stat" style="background:rgba(34,197,94,.1)"><div class="hv" style="color:var(--ok)" id="hlyCost">—</div><div class="hl" title="Casa (fase 1) + carro (disjuntor) × tarifa">Custo</div></div>
             <div class="hourly-stat" style="background:rgba(245,158,11,.1)"><div class="hv" style="color:var(--warn)" id="hlyAvg">—</div><div class="hl">Média W</div></div>
         </div>
         <div class="chart-box" style="height:220px"><canvas id="chartHourly"></canvas></div>
@@ -609,11 +619,12 @@
         <!-- Filter / period selector -->
         <div style="display:flex;gap:.5rem;align-items:center;margin:1rem 0 .5rem;flex-wrap:wrap">
             <span style="color:var(--dim);font-size:.85rem">Período:</span>
-            <button class="soc-preset active" onclick="setChargePeriod(7)">7d</button>
-            <button class="soc-preset" onclick="setChargePeriod(30)">30d</button>
-            <button class="soc-preset" onclick="setChargePeriod(90)">90d</button>
-            <button class="soc-preset" onclick="setChargePeriod(365)">1 ano</button>
-            <button class="soc-preset" onclick="setChargePeriod(9999)">Tudo</button>
+            <button class="soc-preset active" data-period="7" onclick="setChargePeriod(7)">7d</button>
+            <button class="soc-preset" data-period="30" onclick="setChargePeriod(30)">30d</button>
+            <button class="soc-preset" data-period="90" onclick="setChargePeriod(90)">90d</button>
+            <button class="soc-preset" data-period="365" onclick="setChargePeriod(365)">1 ano</button>
+            <button class="soc-preset" data-period="month" onclick="setChargePeriod('month')">Mês</button>
+            <button class="soc-preset" data-period="9999" onclick="setChargePeriod(9999)">Tudo</button>
             <span style="margin-left:auto;color:var(--dim);font-size:.8rem" id="chargePeriodLabel">últimos 7 dias</span>
         </div>
 
@@ -696,13 +707,9 @@ function initCharts() {
         type:'bar', data:{labels:[], datasets:[{label:'kWh', data:[], backgroundColor:'rgba(59,130,246,.6)', borderColor:'#3b82f6', borderWidth:1, borderRadius:3}]},
         options:{...base, scales:{...base.scales, x:{...base.scales.x, offset:true, ticks:{...base.scales.x.ticks, maxTicksLimit:24}}, y:{...base.scales.y, beginAtZero:true, bounds:'ticks'}}}
     });
-    const di = document.getElementById('hourlyDate');
-    if (di) {
-        // Data LOCAL do navegador (toISOString seria UTC — errava o dia após 21h BRT)
-        const n = new Date();
-        const local = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-        di.value = local; di.max = local;
-    }
+    // A data do seletor "Hora a Hora" é sincronizada por loadHourly()
+    // (via currentHourlyDate) — nunca fixada aqui, senão o dia congela
+    // no load da página e o painel aberto há dias fica no dia velho.
 }
 
 const MAX_PTS = 100;
@@ -728,7 +735,7 @@ function pushRT(power, energy) {
     }
 }
 
-function updateUI(data, todayKwh) {
+function updateUI(data, td) {
     const devs = data.devices || {};
     const ts = new Date().toLocaleTimeString('pt-BR');
     document.getElementById('liveDot').classList.remove('offline');
@@ -744,18 +751,29 @@ function updateUI(data, todayKwh) {
     const P = f1.power ?? 0, V = f1.voltage ?? 0, I = f1.current ?? 0;
     // Acumulado do dia: integral power×tempo do servidor (/api/today).
     // O DPS 17 do medidor não é um contador confiável (diminui e reseta sozinho).
-    const E = todayKwh ?? null;
-    document.getElementById('vPower').textContent = fmt(P);
+    const houseKwh = td?.today_kwh ?? null;  // casa (fase 1)
+    const carKwh = td?.breaker_kwh ?? 0;     // carro (disjuntor)
+
+    // Cabeçalho e gráficos ao vivo = casa INTEIRA: os dois medidores
+    // somados (mesma regra do custo; tensão fica com a fase 1 de referência).
+    const br = devs.breaker;
+    const Pb = br?.power_w ?? 0, Vb = br?.voltage_v ?? null, Ib = br?.current_a ?? 0;
+    const E = houseKwh != null ? houseKwh + carKwh : null;
+    document.getElementById('vPower').textContent = fmt(P + Pb);
+    document.getElementById('vPowerSub').textContent = `casa ${P.toFixed(0)} · carro ${Pb.toFixed(0)} W`;
     document.getElementById('vVoltage').textContent = fmt(V);
-    document.getElementById('vCurrent').textContent = I > 0 ? I.toFixed(2) : '—';
+    document.getElementById('vVoltageSub').textContent = `casa ${V.toFixed(1)} · carro ${Vb != null ? Vb.toFixed(1) : '—'} V`;
+    const Itot = I + Ib;
+    document.getElementById('vCurrent').textContent = Itot > 0 ? Itot.toFixed(2) : '—';
+    document.getElementById('vCurrentSub').textContent = `casa ${I.toFixed(2)} · carro ${Ib.toFixed(2)} A`;
     document.getElementById('vEnergy').textContent = E > 0 ? E.toFixed(3) : '—';
+    document.getElementById('vEnergySub').textContent = `casa ${houseKwh != null ? houseKwh.toFixed(3) : '—'} · carro ${carKwh.toFixed(3)} kWh`;
     document.getElementById('p1V').textContent = fmt(V);
     document.getElementById('p1I').textContent = I > 0 ? I.toFixed(2) : '—';
     document.getElementById('p1P').textContent = fmt(P);
-    document.getElementById('p1E').textContent = E > 0 ? E.toFixed(3) : '—';
-    pushRT(P, E);
+    document.getElementById('p1E').textContent = houseKwh > 0 ? houseKwh.toFixed(3) : '—';
+    pushRT(P + Pb, E);
 
-    const br = devs.breaker;
     const isOn = br && (br.switch === true || br.switch === 'true');
     const charging = isOn && P > 10;
 
@@ -1169,10 +1187,20 @@ async function fetchStatus() {
         const data = await status.json(), td = await today.json();
         const c = await charge.json();
         lastCharge = c;
-        updateUI(data, td.today_kwh);
+        updateUI(data, td);
         updateChargeSession(c);
         document.getElementById('vTodayCost').textContent = fmtR(td.today_cost || 0);
         document.getElementById('vMonthCost').textContent = fmtR(td.month_cost || 0);
+        // Quebra por medidor (regra da conta de luz: custo TOTAL = casa + carro)
+        const cost = td.kwh_cost || kwhCost || 0;
+        document.getElementById('vTodayCostSub').textContent =
+            `casa ${fmtR((td.today_kwh || 0) * cost)} · carro ${fmtR((td.breaker_kwh || 0) * cost)}`;
+        document.getElementById('vMonthCostSub').textContent =
+            `casa ${fmtR((td.month_kwh || 0) * cost)} · carro ${fmtR((td.month_breaker_kwh || 0) * cost)}`;
+        document.getElementById('vTodayCost').title =
+            `Casa ${(td.today_kwh || 0).toFixed(2)} + Carro ${(td.breaker_kwh || 0).toFixed(2)} kWh × R$ ${cost.toFixed(3)}/kWh`;
+        document.getElementById('vMonthCost').title =
+            `Casa ${(td.month_kwh || 0).toFixed(2)} + Carro ${(td.month_breaker_kwh || 0).toFixed(2)} kWh × R$ ${cost.toFixed(3)}/kWh`;
         if (td.kwh_cost) kwhCost = td.kwh_cost;
     } catch {
         document.getElementById('liveDot').classList.add('offline');
@@ -1217,7 +1245,8 @@ function renderSummary(d) {
     document.getElementById('hDays').textContent = d.daily?.length ?? '0';
     const avg = d.daily?.length ? d.total_kwh / d.daily.length : 0;
     document.getElementById('hAvg').textContent = avg.toFixed(2);
-    document.getElementById('hAvgCost').textContent = fmtR(avg * kwhCost) + '/dia';
+    // Média de custo deriva do TOTAL (casa + carro) — mesma base do Custo Total
+    document.getElementById('hAvgCost').textContent = fmtR(d.daily?.length ? d.total_cost / d.daily.length : 0) + '/dia';
 }
 
 function renderDailyChart(days) {
@@ -1245,12 +1274,80 @@ function renderTable(days) {
 }
 
 // ─── HOURLY (cloud-first) ───
+// hourlyViewDate === null → modo "hoje ao vivo": o dia é recalculado a cada
+// refresh, então o gráfico rola sozinho para o dia novo à meia-noite mesmo
+// com o painel aberto há dias (antes, a data gravada no load congelava).
+let hourlyViewDate = null;
+let hlyReqId = 0;
+
+function todayLocalStr() {
+    // Data LOCAL do navegador (toISOString seria UTC — errava o dia após 21h BRT)
+    const n = new Date();
+    return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+}
+
+function shiftDayStr(s, delta) {
+    const [y, m, d] = s.split('-').map(Number);
+    const dt = new Date(y, m - 1, d + delta);
+    return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+}
+
+function currentHourlyDate() { return hourlyViewDate || todayLocalStr(); }
+
+function fmtBR(dateStr) {
+    const [y, m, d] = dateStr.split('-');
+    return `${d}/${m}/${y}`;
+}
+
+// O input date (invisível) renderiza mm/dd/aaaa no navegador — o mostrador
+// visível é este botão, sempre em dd/mm/aaaa; clicar abre o seletor nativo.
+function syncHourlyDisplay(date) {
+    document.getElementById('hourlyDate').value = date;
+    document.getElementById('hlyDateBtn').textContent = fmtBR(date);
+}
+
+function openHourlyPicker() {
+    const di = document.getElementById('hourlyDate');
+    if (typeof di.showPicker === 'function') {
+        try { di.showPicker(); return; } catch (e) { /* sem gesture suportada */ }
+    }
+    di.focus();
+}
+
+function updateHourlyNav() {
+    const atToday = currentHourlyDate() >= todayLocalStr();
+    document.getElementById('hlyNext').disabled = atToday;
+    const tb = document.getElementById('hlyToday');
+    tb.disabled = atToday;
+    tb.classList.toggle('live', atToday);
+}
+
+function setHourlyView(dateStr) { // null → hoje ao vivo
+    hourlyViewDate = (dateStr && dateStr !== todayLocalStr()) ? dateStr : null;
+    syncHourlyDisplay(currentHourlyDate());
+    updateHourlyNav();
+    // resposta pode demorar ~1s na placa — escurece para ninguém ler o número
+    // do dia anterior achando que é o dia selecionado
+    const stats = document.querySelector('.hourly-stats');
+    if (stats) stats.style.opacity = .45;
+    loadHourly();
+}
+
+function shiftHourlyDay(delta) { setHourlyView(shiftDayStr(currentHourlyDate(), delta)); }
+function gotoHourlyToday() { setHourlyView(null); }
+function onHourlyDateChange() { setHourlyView(document.getElementById('hourlyDate').value || null); }
+
 async function loadHourly() {
-    const date = document.getElementById('hourlyDate')?.value;
-    if (!date) return;
+    const date = currentHourlyDate();
+    const di = document.getElementById('hourlyDate');
+    di.max = todayLocalStr();
+    syncHourlyDisplay(date); // rolagem visual à meia-noite e formato BR
+    updateHourlyNav();
+    const req = ++hlyReqId;
     try {
         const r = await fetch(`/api/hourly?date=${date}`);
         const d = await r.json();
+        if (req !== hlyReqId) return; // resposta velha: usuário já navegou p/ outro dia
         if (cHourly && d.hours) {
             cHourly.data.labels = d.hours.map(h => h.hour);
             cHourly.data.datasets[0].data = d.hours.map(h => h.kwh);
@@ -1262,17 +1359,38 @@ async function loadHourly() {
         document.getElementById('hlyTotal').textContent = total.toFixed(3);
         document.getElementById('hlyCost').textContent = fmtR(d.total_cost || total * kwhCost);
         document.getElementById('hlyAvg').textContent = avgW.toFixed(0) + 'W';
-    } catch(e) { console.error('Hourly error:', e); }
+        const stats = document.querySelector('.hourly-stats');
+        if (stats) stats.style.opacity = 1;
+    } catch(e) {
+        console.error('Hourly error:', e);
+        const stats = document.querySelector('.hourly-stats');
+        if (stats) stats.style.opacity = 1;
+    }
 }
 
 // ─── CHARGES ───
-let chargePeriodDays = 7;
+let chargePeriod = 7;
 
-function setChargePeriod(d) {
-    chargePeriodDays = d;
-    document.querySelectorAll('#tab-charges .soc-preset').forEach((b, i) => {
-        const map = {0:7, 1:30, 2:90, 3:365, 4:9999};
-        b.classList.toggle('active', map[i] === d);
+// Início do mês corrente em ISO naive LOCAL do navegador — sem toISOString,
+// que é UTC e errava o dia após 21h BRT (mesmo padrão de todayLocalStr()).
+function monthStartLocalISO() {
+    const n = new Date();
+    return n.getFullYear() + '-' + String(n.getMonth()+1).padStart(2,'0') + '-01T00:00:00';
+}
+
+// Query de período compartilhada pelos DOIS endpoints de carregamento
+// (tabela e resumo): 'month' corta desde o dia 1º via param since;
+// os demais vão como days= (9999 = todo o histórico, como antes).
+function chargePeriodQuery() {
+    return chargePeriod === 'month'
+        ? 'since=' + monthStartLocalISO()
+        : 'days=' + chargePeriod;
+}
+
+function setChargePeriod(key) {
+    chargePeriod = key;
+    document.querySelectorAll('#tab-charges .soc-preset').forEach((b) => {
+        b.classList.toggle('active', b.dataset.period === String(key));
     });
     loadCharges();
 }
@@ -1296,16 +1414,17 @@ async function loadCharges() {
     if (!tb) return;
     try {
         const [sessResp, summResp] = await Promise.all([
-            fetch('/api/charge/sessions?limit=200&include_active=true'),
-            fetch('/api/charge/summary?days=' + chargePeriodDays),
+            fetch('/api/charge/sessions?limit=200&include_active=true&' + chargePeriodQuery()),
+            fetch('/api/charge/summary?' + chargePeriodQuery()),
         ]);
         const sessions = await sessResp.json();
         const summary = await summResp.json();
 
         // Period label
-        const periodLabel = chargePeriodDays >= 9999 ? 'todo o período' :
-            chargePeriodDays === 365 ? 'último ano' :
-            `últimos ${chargePeriodDays} dias`;
+        const periodLabel = chargePeriod === 'month' ? 'este mês' :
+            chargePeriod >= 9999 ? 'todo o período' :
+            chargePeriod === 365 ? 'último ano' :
+            `últimos ${chargePeriod} dias`;
         document.getElementById('chargePeriodLabel').textContent = periodLabel;
         document.getElementById('chargeSessionCount').textContent = `${summary.session_count || 0} sessões`;
 
