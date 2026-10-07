@@ -34,15 +34,15 @@
         .tab-content{display:none}.tab-content.active{display:block}
 
         /* Status bar */
-        .status-bar{display:grid;grid-template-columns:repeat(6,1fr);gap:1rem;margin-bottom:1.5rem}
-        .status-item{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1rem 1.2rem;display:flex;align-items:center;gap:1rem;transition:border-color .3s}
+        .status-bar{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:1rem;margin-bottom:1.5rem}
+        .status-item{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1rem 1.1rem;display:flex;align-items:center;gap:.8rem;transition:border-color .3s;min-width:0}
         .status-item:hover{border-color:var(--accent)}
-        .si-icon{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.3rem}
+        .si-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
         .si-label{font-size:.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
-        .si-val{font-size:1.5rem;font-weight:700;margin-top:.1rem}
+        .si-val{font-size:1.35rem;font-weight:700;margin-top:.1rem;white-space:nowrap}
         .si-unit{font-size:.85rem;font-weight:400;color:var(--dim)}
         .status-item>div{min-width:0}
-        .si-sub{font-size:.68rem;color:var(--dim);margin-top:.12rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .si-sub{font-size:.68rem;color:var(--dim);margin-top:.12rem;white-space:pre-line;line-height:1.3;overflow:hidden}
 
         /* Cards */
         .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:1.5rem;margin-bottom:1.5rem;position:relative;overflow:hidden}
@@ -55,7 +55,7 @@
         /* ═══ EV Charging Card ═══ */
         .ev-card{padding:1.2rem}
         .ev-card::before{height:4px;background:linear-gradient(90deg,#00d4aa,#3b82f6,#a855f7)}
-        .ev-cards-row{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem}
+        .ev-cards-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-bottom:1.5rem}
         .ev-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem}
         .ev-header h2{font-size:1.3rem;font-weight:700}
         .ev-status-badge{display:flex;align-items:center;gap:.5rem;padding:.4rem 1rem;border-radius:20px;font-size:.8rem;font-weight:600;background:rgba(255,255,255,.05);border:1px solid var(--border)}
@@ -192,7 +192,7 @@
 
 
         /* Phases */
-        .phases-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;margin-bottom:1.5rem}
+        .phases-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-bottom:1.5rem}
         .phase{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.2rem;transition:border-color .3s}
         .phase:hover{border-color:var(--accent)}
         .phase.future{opacity:.5;border-style:dashed}
@@ -200,7 +200,7 @@
         .phase-name{font-weight:600;display:flex;align-items:center;gap:.5rem}
         .phase-active{font-size:.65rem;padding:.15rem .5rem;border-radius:4px;background:rgba(0,212,170,.15);color:var(--accent)}
         .phase-soon{font-size:.65rem;padding:.15rem .5rem;border-radius:4px;background:rgba(100,116,139,.15);color:var(--dim)}
-        .gauges{display:grid;grid-template-columns:repeat(3,1fr);gap:.6rem;margin-bottom:.8rem}
+        .gauges{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.6rem;margin-bottom:.8rem}
         .gauge{text-align:center;background:rgba(255,255,255,.03);border-radius:8px;padding:.6rem .3rem}
         .gauge .gv{font-size:1.2rem;font-weight:700;color:var(--accent)}
         .gauge .gl{font-size:.6rem;color:var(--dim);text-transform:uppercase;margin-top:.15rem}
@@ -210,9 +210,10 @@
         .phase-footer .pf-unit{font-size:.75rem;color:var(--dim);margin-left:.2rem}
 
         /* Charts */
-        .charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem}
+        .charts-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-bottom:1.5rem}
         .chart-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.2rem}
         .chart-box{position:relative;height:200px}
+        .chart-box canvas{max-width:100%}
 
         /* History */
         .history-bar{display:flex;gap:1rem;align-items:center;margin-bottom:1.5rem;flex-wrap:wrap}
@@ -260,7 +261,7 @@
         footer{text-align:center;padding:2rem;color:var(--dim);font-size:.75rem}
         footer a{color:var(--accent);text-decoration:none}
 
-        @media(max-width:1100px){.status-bar{grid-template-columns:repeat(3,1fr)}}
+        @media(max-width:1100px){.status-bar{grid-template-columns:repeat(3,minmax(0,1fr))}}
         @media(max-width:900px){
             .ev-stats{grid-template-columns:repeat(3,1fr)}
             .ev-center{flex-direction:column}
@@ -269,7 +270,7 @@
             .ev-plan-grid{grid-template-columns:repeat(2,1fr)}
             .ev-actions{flex-direction:column}
             .ev-breaker{flex-direction:column;gap:.5rem}
-            .status-bar{grid-template-columns:repeat(2,1fr)}
+            .status-bar{grid-template-columns:repeat(2,minmax(0,1fr))}
             .phases-grid,.charts-grid{grid-template-columns:1fr}
             .summary{grid-template-columns:repeat(2,1fr)}
         }
@@ -301,12 +302,18 @@
 <div id="tab-dashboard" class="tab-content active">
 
     <div class="status-bar">
-        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">⚡</div><div><div class="si-label" title="Instantâneo: casa (fase 1) + carro (disjuntor)">Consumo</div><div class="si-val"><span id="vPower">—</span> <span class="si-unit">W</span></div><div class="si-sub" id="vPowerSub">casa — · carro —</div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(59,130,246,.15)">🔌</div><div><div class="si-label" title="Os dois medidores estão na mesma fase — tensão não se soma; a linha de baixo mostra cada um">Tensão</div><div class="si-val"><span id="vVoltage">—</span> <span class="si-unit">V</span></div><div class="si-sub" id="vVoltageSub">casa — · carro —</div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">🔋</div><div><div class="si-label" title="Soma: casa (fase 1) + carro (disjuntor), mesma fase">Corrente</div><div class="si-val"><span id="vCurrent">—</span> <span class="si-unit">A</span></div><div class="si-sub" id="vCurrentSub">casa — · carro —</div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">📊</div><div><div class="si-label" title="Energia consumida hoje: casa (fase 1) + carro (disjuntor)">Energia hoje</div><div class="si-val"><span id="vEnergy">—</span> <span class="si-unit">kWh</span></div><div class="si-sub" id="vEnergySub">casa — · carro —</div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">💰</div><div><div class="si-label" title="Casa (fase 1) + carro (disjuntor) × tarifa">Custo Mês</div><div class="si-val" style="color:var(--ok)" id="vMonthCost">R$ —</div><div class="si-sub" id="vMonthCostSub">casa — · carro —</div></div></div>
-        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">📅</div><div><div class="si-label" title="Casa (fase 1) + carro (disjuntor) × tarifa">Custo Hoje</div><div class="si-val" style="color:var(--warn)" id="vTodayCost">R$ —</div><div class="si-sub" id="vTodayCostSub">casa — · carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">⚡</div><div><div class="si-label" title="Instantâneo: casa (fase 1) + carro (disjuntor)">Consumo</div><div class="si-val"><span id="vPower">—</span> <span class="si-unit">W</span></div><div class="si-sub" id="vPowerSub">casa —
+carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(59,130,246,.15)">🔌</div><div><div class="si-label" title="Os dois medidores estão na mesma fase — tensão não se soma; a linha de baixo mostra cada um">Tensão</div><div class="si-val"><span id="vVoltage">—</span> <span class="si-unit">V</span></div><div class="si-sub" id="vVoltageSub">casa —
+carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">🔋</div><div><div class="si-label" title="Soma: casa (fase 1) + carro (disjuntor), mesma fase">Corrente</div><div class="si-val"><span id="vCurrent">—</span> <span class="si-unit">A</span></div><div class="si-sub" id="vCurrentSub">casa —
+carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">📊</div><div><div class="si-label" title="Energia consumida hoje: casa (fase 1) + carro (disjuntor)">Energia hoje</div><div class="si-val"><span id="vEnergy">—</span> <span class="si-unit">kWh</span></div><div class="si-sub" id="vEnergySub">casa —
+carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(34,197,94,.15)">💰</div><div><div class="si-label" title="Casa (fase 1) + carro (disjuntor) × tarifa">Custo Mês</div><div class="si-val" style="color:var(--ok)" id="vMonthCost">R$ —</div><div class="si-sub" id="vMonthCostSub">casa —
+carro —</div></div></div>
+        <div class="status-item"><div class="si-icon" style="background:rgba(245,158,11,.15)">📅</div><div><div class="si-label" title="Casa (fase 1) + carro (disjuntor) × tarifa">Custo Hoje</div><div class="si-val" style="color:var(--warn)" id="vTodayCost">R$ —</div><div class="si-sub" id="vTodayCostSub">casa —
+carro —</div></div></div>
     </div>
 
     <div class="ev-cards-row">
@@ -760,14 +767,14 @@ function updateUI(data, td) {
     const Pb = br?.power_w ?? 0, Vb = br?.voltage_v ?? null, Ib = br?.current_a ?? 0;
     const E = houseKwh != null ? houseKwh + carKwh : null;
     document.getElementById('vPower').textContent = fmt(P + Pb);
-    document.getElementById('vPowerSub').textContent = `casa ${P.toFixed(0)} · carro ${Pb.toFixed(0)} W`;
+    document.getElementById('vPowerSub').textContent = `casa ${P.toFixed(0)}\ncarro ${Pb.toFixed(0)} W`;
     document.getElementById('vVoltage').textContent = fmt(V);
-    document.getElementById('vVoltageSub').textContent = `casa ${V.toFixed(1)} · carro ${Vb != null ? Vb.toFixed(1) : '—'} V`;
+    document.getElementById('vVoltageSub').textContent = `casa ${V.toFixed(1)}\ncarro ${Vb != null ? Vb.toFixed(1) : '—'} V`;
     const Itot = I + Ib;
     document.getElementById('vCurrent').textContent = Itot > 0 ? Itot.toFixed(2) : '—';
-    document.getElementById('vCurrentSub').textContent = `casa ${I.toFixed(2)} · carro ${Ib.toFixed(2)} A`;
+    document.getElementById('vCurrentSub').textContent = `casa ${I.toFixed(2)}\ncarro ${Ib.toFixed(2)} A`;
     document.getElementById('vEnergy').textContent = E > 0 ? E.toFixed(3) : '—';
-    document.getElementById('vEnergySub').textContent = `casa ${houseKwh != null ? houseKwh.toFixed(3) : '—'} · carro ${carKwh.toFixed(3)} kWh`;
+    document.getElementById('vEnergySub').textContent = `casa ${houseKwh != null ? houseKwh.toFixed(3) : '—'}\ncarro ${carKwh.toFixed(3)} kWh`;
     document.getElementById('p1V').textContent = fmt(V);
     document.getElementById('p1I').textContent = I > 0 ? I.toFixed(2) : '—';
     document.getElementById('p1P').textContent = fmt(P);
@@ -1194,9 +1201,9 @@ async function fetchStatus() {
         // Quebra por medidor (regra da conta de luz: custo TOTAL = casa + carro)
         const cost = td.kwh_cost || kwhCost || 0;
         document.getElementById('vTodayCostSub').textContent =
-            `casa ${fmtR((td.today_kwh || 0) * cost)} · carro ${fmtR((td.breaker_kwh || 0) * cost)}`;
+            `casa ${fmtR((td.today_kwh || 0) * cost)}\ncarro ${fmtR((td.breaker_kwh || 0) * cost)}`;
         document.getElementById('vMonthCostSub').textContent =
-            `casa ${fmtR((td.month_kwh || 0) * cost)} · carro ${fmtR((td.month_breaker_kwh || 0) * cost)}`;
+            `casa ${fmtR((td.month_kwh || 0) * cost)}\ncarro ${fmtR((td.month_breaker_kwh || 0) * cost)}`;
         document.getElementById('vTodayCost').title =
             `Casa ${(td.today_kwh || 0).toFixed(2)} + Carro ${(td.breaker_kwh || 0).toFixed(2)} kWh × R$ ${cost.toFixed(3)}/kWh`;
         document.getElementById('vMonthCost').title =

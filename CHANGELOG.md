@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-07 (2)
+
+### Fixed
+- 📐 **Cabeçalho estourava a largura da página: 6º quadro (Custo Hoje) cortado e scroll horizontal** — os tracks `repeat(6,1fr)` têm piso de `min-content` e as linhas novas "casa · carro" são `nowrap`: a soma dos mínimos (~1450px) ultrapassava o container (~1287px em janela 1366) e o grid transbordava 118px além da viewport, com quadros de larguras desiguais (189–251px). Correção em 3 camadas: (1) todos os grids da página (`status-bar`, `ev-cards-row`, `phases-grid`, `gauges`, `charts-grid` + breakpoints 1100/640) usam `minmax(0,1fr)` e `.status-item` ganhou `min-width:0` — quadros iguais, sem transbordo (mesma família de bug no gráfico do canvas em janelas menores, resolvida de quebra; `canvas` com `max-width:100%`); (2) a quebra por medidor virou DUAS micro-linhas (`\n` + `white-space:pre-line`) em vez de uma com "·" — numa coluna de ~100px a linha única ia cortar com reticências justamente os R$ do carro; (3) ajuste fino medido no navegador: `si-val` 1.5→1.35rem com `nowrap` (o "kWh" do valor quebrava sozinho pra linha de baixo com valores ≥6 dígitos), ícone 44→40px, gap 1rem→.8rem, padding lateral 1.2→1.1rem. Barra final: 110px de altura (era 100 sem a quebra), overflow 0 e zero cortes em 1920/1366/1100/640 (validado com mock + screenshots).
+
 ## [Unreleased] - 2026-10-07
 
 ### Fixed
