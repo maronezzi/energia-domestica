@@ -935,7 +935,8 @@ def update_charge_session_progress(
 
 
 def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="manual",
-                            effective_end_time=None, charge_complete_confident=False):
+                            effective_end_time=None, charge_complete_confident=False,
+                            soc_start_confirmed=False):
     """Mark a charge session as finished. Computes totals. Saves stats for future predictions.
 
     effective_end_time: when the car actually stopped drawing power (excludes
@@ -947,6 +948,11 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
     soc_end é pinado em 100 (a estimativa energética pode ter ficado aquém —
     sessão 128 terminou "92%" com o carro cheio de verdade) e o soc_start é
     reconciliado de trás pra frente com o consumo medido.
+
+    soc_start_confirmed: True quando o SOC de partida veio do usuário (input
+    no dashboard antes ou durante a sessão). Só com essa âncora a eficiência
+    é re-aprendida — ancorar na partida ESTIMADA fez a η derivar
+    0,937 → 0,76 (sessões 129–134) e a 135 terminar "88%" com o carro cheio.
     """
     conn = get_db()
     try:
@@ -974,10 +980,9 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
         eff = load_config().get("car_charge_efficiency", 0.85)
         eff_aprendida = None
         # Referência real de carga completa: com a parada confiante, o fim É o
-        # 100% do carro. Aproveitamos a dupla (partida estimada, energia medida)
-        # para aprender a eficiência real grid→bateria — a configurada pode
-        # estar errada (0,85 vs ~0,94 medido), e é ela que faz a estimativa
-        # energética divergir do carro.
+        # 100% do carro. A dupla (partida, energia medida) só vira aprendizado
+        # da eficiência quando a partida é confirmada pelo usuário (âncora);
+        # o pin do soc_end=100 independe disso — o carro parar sozinho É cheio.
         if (
             charge_complete_confident
             and end_reason == "auto"
@@ -986,17 +991,35 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
         ):
             soc_end = 100.0  # o carro só para sozinho quando encheu de verdade
             if soc_start is not None and soc_start < 100:
-                eff_learned = (
-                    (100.0 - soc_start) / 100.0 * battery_kwh
-                ) / energy_delivered
-                if 0.70 <= eff_learned <= 1.0:
-                    eff_aprendida = round(eff_learned, 3)
+                if not soc_start_confirmed:
                     print(
-                        f"🎓 Eficiência real aprendida: {eff:.2f} → {eff_aprendida} "
-                        f"({energy_delivered:.2f} kWh no medidor para "
-                        f"{100.0 - soc_start:.1f}% de bateria)"
+                        f"🎓 η mantida em {eff:.2f} (partida estimada, sem "
+                        f"confirmação do usuário — sem âncora para re-aprender)"
                     )
-                    eff = eff_aprendida
+                else:
+                    eff_learned = (
+                        (100.0 - soc_start) / 100.0 * battery_kwh
+                    ) / energy_delivered
+                    # Medida fora da faixa possível (typo no SOC, sessão
+                    # atípica) não vira aprendizado algum; dentro dela, o alvo
+                    # é clampado na faixa física 0,85–0,98 e a η anda no máx.
+                    # ±0,025 por carga a partir da atual — nunca um salto.
+                    if not (0.70 <= eff_learned <= 1.00):
+                        print(
+                            f"🎓 η medida {eff_learned:.2f} implausível — "
+                            f"mantida em {eff:.2f}"
+                        )
+                    else:
+                        eff_alvo = min(0.98, max(0.85, eff_learned))
+                        eff_aprendida = round(
+                            eff + max(-0.025, min(0.025, eff_alvo - eff)), 3,
+                        )
+                        print(
+                            f"🎓 Eficiência: {eff:.2f} → {eff_aprendida} "
+                            f"(medida {eff_learned:.3f}: {energy_delivered:.2f} kWh "
+                            f"no medidor para {100.0 - soc_start:.1f}% de bateria)"
+                        )
+                        eff = eff_aprendida
         # Reconciliação do SOC inicial: quando a sessão termina porque o CARRO
         # parou sozinho (end_reason='auto'), o fim é o 100% real da bateria —
         # então o soc_start verdadeiro é 100% − energia entregue ÷ eficiência.
@@ -1866,15 +1889,21 @@ class ChargingTracker:
         # o carro retomar ou estourar a janela de idle).
         self.probe_phase = "none"
         self.probe_phase_since = None
+        # SOC de partida confirmado pelo usuário (input no dashboard): única
+        # âncora confiável para re-aprender a eficiência — ancorar na
+        # estimativa fez a η derivar 0,937 → 0,76 (sessões 129–134).
+        self.soc_confirmed = False
 
     def start(
-        self, start_soc, target_soc, battery_kwh, start_energy_kwh, session_uuid=None
+        self, start_soc, target_soc, battery_kwh, start_energy_kwh, session_uuid=None,
+        soc_confirmed=False,
     ):
         with self.lock:
             self.state = self.STATE_CHARGING
             self.start_time = datetime.now()
             self.start_energy_kwh = start_energy_kwh
             self.start_soc = start_soc
+            self.soc_confirmed = bool(soc_confirmed)
             self.target_soc = target_soc
             self.battery_kwh = battery_kwh
             self.last_power_w = 0.0
@@ -1918,6 +1947,7 @@ class ChargingTracker:
             self.last_active_time = None
             self.probe_phase = "none"
             self.probe_phase_since = None
+            self.soc_confirmed = False
 
     def apply_soc_correction(self, new_soc):
         """User corrected the SOC mid-session (dashboard input).
@@ -1929,6 +1959,7 @@ class ChargingTracker:
         with self.lock:
             if self.state not in (self.STATE_CHARGING, self.STATE_COMPLETING):
                 return None
+            self.soc_confirmed = True
             last_e = (
                 self.energy_samples[-1][1]
                 if self.energy_samples
@@ -2479,6 +2510,7 @@ def poll_loop():
                     battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
                     start_energy_kwh=br.get("energy_kwh", 0),
                     session_uuid=session["session_uuid"],
+                    soc_confirmed=not soc_estimated,
                 )
                 # Sync config so recovery and UI reflect the auto-detected session
                 cfg_detect["car_charging"] = True
@@ -2642,6 +2674,7 @@ def poll_loop():
                                             end_reason="auto",
                                             effective_end_time=charging.effective_end_time,
                                             charge_complete_confident=True,
+                                            soc_start_confirmed=charging.soc_confirmed,
                                         )
                                         # finalize gravou car_current_soc (e talvez
                                         # a eficiência aprendida) no config;
@@ -2705,6 +2738,7 @@ def poll_loop():
                                             soc_end=charging.effective_soc,
                                             end_reason="auto",
                                             effective_end_time=charging.effective_end_time,
+                                            soc_start_confirmed=charging.soc_confirmed,
                                         )
                                         # finalize gravou car_current_soc no
                                         # config; recarregar para o save_config
@@ -3150,6 +3184,7 @@ def api_car_start_charge():
             battery_kwh=cfg.get("car_battery_kwh", 12.9),
             start_energy_kwh=start_energy,
             session_uuid=session["session_uuid"],
+            soc_confirmed=not _soc_estimated,
         )
         cfg["car_charging"] = True
         cfg["car_current_soc"] = soc_start

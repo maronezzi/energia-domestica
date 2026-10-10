@@ -150,6 +150,21 @@ class TestChargingTracker(unittest.TestCase):
         t = self._new_tracker()
         self.assertIsNone(t.apply_soc_correction(30.0))
 
+    def test_soc_confirmed_flag_lifecycle(self):
+        """âncora do aprendizado da η: False na partida estimada, True quando
+        o usuário informa o SOC (antes ou durante a sessão), reset no stop."""
+        t = self._new_tracker()
+        self.assertFalse(t.soc_confirmed)
+        t.start(50, 80, 12.9, 10.0)
+        self.assertFalse(t.soc_confirmed)  # partida estimada
+        t.apply_soc_correction(60.0)  # usuário informa o SOC → âncora
+        self.assertTrue(t.soc_confirmed)
+        t.stop()
+        self.assertFalse(t.soc_confirmed)  # reset p/ próxima sessão
+        t2 = self._new_tracker()
+        t2.start(50, 80, 12.9, 10.0, soc_confirmed=True)  # informado antes da plugada
+        self.assertTrue(t2.soc_confirmed)
+
     def test_no_prediction_when_not_charging(self):
         """estimated_remaining_minutes must be None when the car draws 0W."""
         t = self._new_tracker()
@@ -387,6 +402,62 @@ class TestChargeSessionDB(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["status"], "no_charge")
         self.assertAlmostEqual(result["energy_delivered_kwh"], 0.0, places=3)
+
+    def _confident_session(self, soc_start, end_kwh, energy):
+        """Sessão cheia confiante (carro parou sozinho) com partida soc_start."""
+        from dashboard import create_charge_session
+        return create_charge_session(
+            soc_start=soc_start, soc_target=100, battery_kwh=12.9,
+            start_energy_kwh=end_kwh - energy, cost_per_kwh=1.0,
+        )
+
+    def test_confident_pin_without_anchor_keeps_eta(self):
+        """Regressão da sessão 135 (corrigida em partes): fim confiante pina
+        soc_end=100 INDEPENDENTE de âncora, mas a η só re-aprende com partida
+        confirmada — ancorar na estimativa derivou 0,937 → 0,76."""
+        from dashboard import (create_charge_session, finalize_charge_session,
+                               load_config, save_config)
+        save_config({"car_charge_efficiency": 0.937})
+        s = self._confident_session(36, 1008.8, 8.8)
+        r = finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=1008.8, soc_end=87.8,
+            end_reason="auto", charge_complete_confident=True,
+        )
+        self.assertEqual(r["soc_end"], 100.0)  # carro parou sozinho = cheio
+        self.assertAlmostEqual(load_config()["car_charge_efficiency"], 0.937)
+
+    def test_confident_learns_eta_with_confirmed_start(self):
+        """Com âncora do usuário, η medida = (100−partida)%×bateria÷energia.
+        64% × 12,9 ÷ 8,8 = 0,9382 → passo pequeno a partir de 0,937."""
+        from dashboard import (finalize_charge_session, list_charge_sessions,
+                               load_config, save_config)
+        save_config({"car_charge_efficiency": 0.937})
+        s = self._confident_session(36, 1008.8, 8.8)
+        finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=1008.8, soc_end=87.8,
+            end_reason="auto", charge_complete_confident=True,
+            soc_start_confirmed=True,
+        )
+        self.assertAlmostEqual(load_config()["car_charge_efficiency"], 0.938, places=3)
+        sess = [x for x in list_charge_sessions(limit=5)
+                if x["session_uuid"] == s["session_uuid"]][0]
+        # reconciliado com a η final: 100 − 8,8×0,938/12,9×100 ≈ 36,0
+        self.assertAlmostEqual(sess["soc_start"], 36.01, delta=0.05)
+
+    def test_eta_update_capped_and_clamped(self):
+        """Amortecimento: medida 0,983 (acima do teto físico 0,98) vira alvo
+        0,98, mas a η anda no máx. +0,025 por carga — 0,85 → 0,875, nunca
+        um salto."""
+        from dashboard import finalize_charge_session, load_config, save_config
+        save_config({"car_charge_efficiency": 0.85})
+        # 85% × 12,9 ÷ 11,15 kWh = 0,9834 → alvo clampado em 0,98
+        s = self._confident_session(15, 1011.15, 11.15)
+        finalize_charge_session(
+            s["session_uuid"], end_energy_kwh=1011.15, soc_end=60.0,
+            end_reason="auto", charge_complete_confident=True,
+            soc_start_confirmed=True,
+        )
+        self.assertAlmostEqual(load_config()["car_charge_efficiency"], 0.875, places=3)
 
     def test_effective_end_time_excludes_idle_from_duration(self):
         """Duration uses effective_end_time, not wall-clock finalize time."""
@@ -687,16 +758,20 @@ class TestChargeSessionDB(unittest.TestCase):
     def test_confident_full_pins_soc_end_and_reconciles_start(self):
         """Sessão 128 (28/09): o modelo estimou soc_end=92,09% mas o carro
         parou SOZINHO com energia ≥90% do necessário — ele estava em 100% real.
-        O fim é pinado em 100 e o soc_start é recalculado de trás pra frente."""
+        O fim é pinado em 100 e o soc_start é recalculado de trás pra frente.
+        Com partida confirmada (âncora) e η já em 0,937, a medida 0,9372
+        confirma a η e a reconciliação fecha em ~15%."""
         import dashboard
-        from dashboard import create_charge_session, finalize_charge_session
+        from dashboard import create_charge_session, finalize_charge_session, save_config
+        save_config({"car_charge_efficiency": 0.937})
         s = create_charge_session(**self._N128)
         result = finalize_charge_session(
             s["session_uuid"], end_energy_kwh=1022.2, soc_end=92.09,
             end_reason="auto", charge_complete_confident=True,
+            soc_start_confirmed=True,
         )
         self.assertAlmostEqual(result["soc_end"], 100.0, places=6)
-        # η aprendida = (100−15)% × 12,9 kWh ÷ 11,7 kWh = 0,937
+        # η medida = (100−15)% × 12,9 kWh ÷ 11,7 kWh = 0,937
         row = self._row(s["session_uuid"])
         self.assertAlmostEqual(row["soc_start"], 15.02, places=1)
         self.assertAlmostEqual(row["soc_end"], 100.0, places=6)
@@ -707,18 +782,20 @@ class TestChargeSessionDB(unittest.TestCase):
         self.assertEqual(cfg["car_current_soc"], 100)
 
     def test_confident_full_learned_eff_reconciles_with_new_value(self):
-        """A reconciliação usa a eficiência ACABADA de aprender, não a antiga:
-        com η=0,937, 11,7 kWh ⇄ ~85% de bateria → partida ≈ 15% (o padrão de
-        uso que 'está batendo com o real'), não 22,9% (que a η=0,85 daria)."""
+        """A reconciliação usa a eficiência ACABADA de aprender, não a antiga.
+        Da η=0,85 com partida confirmada, a medida 0,9372 anda limitada a
+        +0,025 → 0,875; a partida reconciliada com a η NOVA é ~20,6 (não os
+        22,9 que a η velha daria, nem o 15,0 de um salto sem amortecimento)."""
         from dashboard import create_charge_session, finalize_charge_session
         s = create_charge_session(**self._N128)
         finalize_charge_session(
             s["session_uuid"], end_energy_kwh=1022.2, soc_end=92.09,
             end_reason="auto", charge_complete_confident=True,
+            soc_start_confirmed=True,
         )
         soc_start = self._row(s["session_uuid"])["soc_start"]
-        self.assertAlmostEqual(soc_start, 15.0, places=1)
-        self.assertLess(soc_start, 20)  # longe do 22,9 da η velha
+        self.assertAlmostEqual(soc_start, 20.64, places=2)
+        self.assertLess(soc_start, 22.91)  # longe da reconciliação pela η velha
 
     def test_probe_conclude_keeps_energy_estimate(self):
         """Sonda sem retomada prova que o carro não voltou — NÃO que encheu.
@@ -735,8 +812,9 @@ class TestChargeSessionDB(unittest.TestCase):
         self.assertAlmostEqual(cfg["car_charge_efficiency"], 0.85, places=3)
 
     def test_confident_full_implausible_efficiency_not_learned(self):
-        """Energia implausível (η fora de 0,70–1,00) não vira aprendizado —
-        mas o soc_end continua pinado em 100 (a parada confiante é fato)."""
+        """Energia implausível (η medida fora de 0,70–1,00) não vira
+        aprendizado algum mesmo com âncora — mas o soc_end continua pinado
+        em 100 (a parada confiante é fato)."""
         import dashboard
         from dashboard import create_charge_session, finalize_charge_session
         s = create_charge_session(soc_start=15.0, soc_target=100, battery_kwh=12.9,
@@ -745,6 +823,7 @@ class TestChargeSessionDB(unittest.TestCase):
         result = finalize_charge_session(
             s["session_uuid"], end_energy_kwh=102.5, soc_end=34.4,
             end_reason="auto", charge_complete_confident=True,
+            soc_start_confirmed=True,
         )
         self.assertAlmostEqual(result["soc_end"], 100.0, places=6)
         cfg = dashboard.load_config()
