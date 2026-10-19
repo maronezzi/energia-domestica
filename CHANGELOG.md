@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased] - 2026-10-19
+
+### Changed
+- ⛽ **km/L em vez de L/100km (medida do povo)** — o card "Consumo BYD (7d)" agora mostra km/L (inverso do L/100km do gráfico nativo; 3,8 L/100km → 26,3 km/L), e a linha do gráfico de 14 dias virou **km/kWh** elétrico (quanto maior, melhor) — antes era kWh/100km, padrão europeu que ninguém usa no Brasil.
+- 💰 **Cada abastecimento tem o SEU preço, congelado na detecção** — o combustível oscila e o preço do config não pode retroagir sobre o histórico: `byd_fuel_events.price_per_l` é carimbado com o `car_fuel_price` do config NO MOMENTO da detecção (migration ALTER TABLE para tabelas antigas; o config passa a valer só como padrão dos PRÓXIMOS). O custo de cada evento, o custo do mês e o card Mensal usam o preço de cada um. **Preço editável na própria linha** da tabela de abastecimentos (input R$/L → `POST /api/byd/fuel/price?id=&price=` — query params, porque escalares no FastAPI são query, não body JSON) e aviso contextual quando algum evento está sem preço. Fix de consistência: custo usa litros BRUTOS × preço nos dois lugares (fuel e mensal diferiam R$ 0,25 por arredondamento). Cadeia testada ponta a ponta na placa com evento de teste (inserido, editado pelo navegador: 6,29 → R$ 96,61 recalculado, removido).
+
 ## [Unreleased] - 2026-10-18 (3)
 
 ### Added

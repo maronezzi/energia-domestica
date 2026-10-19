@@ -759,11 +759,14 @@ carro —</div></div></div>
             <h3 style="margin:1rem 0 .4rem">Abastecimentos detectados</h3>
             <div class="table-wrap">
                 <table class="data-table">
-                    <thead><tr><th>Data</th><th>Tanque</th><th>Estimativa</th><th>Custo</th></tr></thead>
+                    <thead><tr><th>Data</th><th>Tanque</th><th>Estimativa</th><th>Preço (R$/L)</th><th>Custo</th></tr></thead>
                     <tbody id="fuelTbody">
-                        <tr><td colspan="4" style="text-align:center;color:var(--dim);padding:1.2rem">Nenhum abastecimento detectado ainda.</td></tr>
+                        <tr><td colspan="5" style="text-align:center;color:var(--dim);padding:1.2rem">Nenhum abastecimento detectado ainda.</td></tr>
                     </tbody>
                 </table>
+            </div>
+            <div style="color:var(--dim);font-size:.8rem;margin-top:.4rem">
+                Cada abastecimento congela o preço do litro da época (padrão: o preço da aba ⚙️ Config) — o valor muda, o histórico não. Edite o preço na própria linha se a bomba marcou outro valor.
             </div>
             <div id="fuelConfigHint" style="color:var(--warn);font-size:.85rem;margin-top:.6rem;display:none">
                 ⚠️ Informe o preço do litro e a capacidade do tanque na aba ⚙️ Config para ver os litros e o R$ de cada abastecimento.
@@ -817,7 +820,7 @@ carro —</div></div></div>
                 <canvas id="chartBydDaily"></canvas>
             </div>
             <div style="color:var(--dim);font-size:.9rem;margin-top:.4rem">
-                Últimos 14 dias: barras = km rodados · linha = kWh/100km EV estimado (ΔSOC × bateria). A "casa" é aprendida automaticamente das posições do carro; viagens com ≥ 0,2 km.
+                Últimos 14 dias: barras = km rodados · linha = km/kWh elétrico (ΔSOC × bateria; quanto maior, melhor). A "casa" é aprendida automaticamente das posições do carro; viagens com ≥ 0,2 km.
             </div>
         </div>
     </div>
@@ -834,7 +837,7 @@ carro —</div></div></div>
     </div>
     <div class="settings">
         <h3>⛽ Combustível (BYD híbrido)</h3>
-        <div class="s-row"><div class="s-label"><div>Preço do litro</div><div class="desc">Gasolina na sua região — custo dos abastecimentos detectados</div></div><div class="s-input"><span style="color:var(--dim)">R$</span><input type="text" id="fuelPriceInput" inputmode="decimal" pattern="[0-9]*[.,]?[0-9]{0,3}" min="0" placeholder="6,19"></div></div>
+        <div class="s-row"><div class="s-label"><div>Preço do litro</div><div class="desc">Padrão para NOVOS abastecimentos (o preço de cada um fica congelado nele e pode ser corrigido na aba Carro)</div></div><div class="s-input"><span style="color:var(--dim)">R$</span><input type="text" id="fuelPriceInput" inputmode="decimal" pattern="[0-9]*[.,]?[0-9]{0,3}" min="0" placeholder="6,19"></div></div>
         <div class="s-row"><div class="s-label"><div>Capacidade do tanque</div><div class="desc">Litros — estima quantos litros entraram em cada abastecimento (Song Pro DM-i ≈ 48 L)</div></div><div class="s-input"><input type="text" id="tankInput" inputmode="decimal" pattern="[0-9]*[.,]?[0-9]{0,2}" min="0"> <span style="color:var(--dim)">L</span></div></div>
         <div style="margin-top:1rem"><button class="btn-save" onclick="saveFuel()">💾 Salvar</button></div>
         <div class="alert ok" id="fuelOk" style="display:none">✅ Salvo!</div>
@@ -1801,7 +1804,7 @@ function initBydDailyChart() {
         type: 'bar',
         data: {labels: [], datasets: [
             {label: 'km', data: [], backgroundColor: 'rgba(59,130,246,.5)', borderColor: '#3b82f6', borderWidth: 1, borderRadius: 3, yAxisID: 'y'},
-            {label: 'kWh/100km', data: [], type: 'line', borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.1)', borderWidth: 2, pointRadius: 2, tension: .3, yAxisID: 'y2', spanGaps: true}
+            {label: 'km/kWh', data: [], type: 'line', borderColor: '#00d4aa', backgroundColor: 'rgba(0,212,170,.1)', borderWidth: 2, pointRadius: 2, tension: .3, yAxisID: 'y2', spanGaps: true}
         ]},
         options: {responsive: true, maintainAspectRatio: false, animation: {duration: 200},
             plugins: {legend: {labels: {color: '#64748b', font: {size: 11}}}},
@@ -1870,7 +1873,8 @@ function renderBydDiario(day, positions, trips, daily) {
     const days = daily.days || [];
     cBydDaily.data.labels = days.map(x => x.date.slice(8) + '/' + x.date.slice(5, 7));
     cBydDaily.data.datasets[0].data = days.map(x => x.km);
-    cBydDaily.data.datasets[1].data = days.map(x => x.kwh_per_100km);
+    // km/kWh (medida do povo): inverso do kWh/100km — quanto maior, melhor
+    cBydDaily.data.datasets[1].data = days.map(x => x.kwh_per_100km ? +(100 / x.kwh_per_100km).toFixed(1) : null);
     cBydDaily.update();
 
     // mapa
@@ -1936,24 +1940,44 @@ async function loadFuelData() {
         const evs = f.events || [];
         const tb = document.getElementById('fuelTbody');
         if (!evs.length) {
-            tb.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--dim);padding:1.2rem">Nenhum abastecimento desde que a coleta começou — o salto de nível no gráfico acima marca um automaticamente.</td></tr>';
+            tb.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--dim);padding:1.2rem">Nenhum abastecimento desde que a coleta começou — o salto de nível no gráfico acima marca um automaticamente.</td></tr>';
         } else {
             tb.innerHTML = evs.map(e => {
                 const d = new Date(e.ts * 1000);
                 const dt = d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
                 return '<tr><td>' + dt + '</td><td>' + Math.round(e.level_before) + '% → ' + Math.round(e.level_after) + '%</td><td><b>+' +
-                    (e.liters != null ? e.liters.toFixed(1) : '—') + ' L</b></td><td>' + (e.cost != null ? fmtR(e.cost) : '—') + '</td></tr>';
+                    (e.liters != null ? e.liters.toFixed(1) : '—') + ' L</b></td>' +
+                    '<td>R$ <input type="text" inputmode="decimal" value="' + (e.price != null ? e.price : '') + '" data-id="' + e.id + '" onchange="setFuelPrice(this)" style="width:72px;background:transparent;border:1px solid rgba(255,255,255,.14);border-radius:6px;color:var(--fg);padding:.15rem .3rem;text-align:center"></td>' +
+                    '<td><b>' + (e.cost != null ? fmtR(e.cost) : '—') + '</b></td></tr>';
             }).join('');
         }
-        document.getElementById('fuelConfigHint').style.display = (!f.fuel_price) ? 'block' : 'none';
-        // consumo BYD 7 dias (perna combustível do gráfico nativo)
+        // sem preço congelado em algum evento → avisa (custo parcial na tabela/mês)
+        const semPreco = evs.some(e => e.price == null);
+        document.getElementById('fuelConfigHint').style.display = semPreco ? 'block' : 'none';
+        if (semPreco) document.getElementById('fuelConfigHint').textContent =
+            '⚠️ Alguns abastecimentos estão sem preço — defina o padrão na aba ⚙️ Config (vale para os próximos) ou edite o preço na própria linha.';
+        // consumo BYD 7 dias em km/L (unidade do povo) — perna combustível do gráfico nativo
         const g = f.byd_graph && f.byd_graph.self_graph;
         if (g && Array.isArray(g.energy_consumption) && g.energy_consumption.length) {
+            const unit = g.energy_consumption_unit || '';
             const vals = g.energy_consumption.filter(v => v > 0);
-            const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-            document.getElementById('fuelCons7d').textContent = avg != null ? avg.toFixed(1) + ' L/100km' : '—';
+            if (vals.length && unit.includes('L/100km')) {
+                const kmL = vals.reduce((a, b) => a + 100 / b, 0) / vals.length;
+                document.getElementById('fuelCons7d').textContent = kmL.toFixed(1) + ' km/L';
+            } else if (vals.length) {
+                const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+                document.getElementById('fuelCons7d').textContent = avg.toFixed(1) + ' ' + unit;
+            }
         }
     } catch (e) { /* best-effort */ }
+}
+
+async function setFuelPrice(inp) {
+    const id = Number(inp.getAttribute('data-id'));
+    const price = parseFloat(inp.value.replace(',', '.'));
+    if (!id || isNaN(price) || price <= 0) { loadFuelData(); return; }
+    await fetch('/api/byd/fuel/price?id=' + id + '&price=' + price, {method: 'POST'});
+    loadFuelData();
 }
 
 async function loadMonthly() {

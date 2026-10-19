@@ -168,9 +168,16 @@ def init_db():
             CREATE TABLE IF NOT EXISTS byd_fuel_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts INTEGER,                  -- epoch UTC da detecção
-                level_before REAL, level_after REAL, delta_pp REAL
+                level_before REAL, level_after REAL, delta_pp REAL,
+                price_per_l REAL             -- R$/L CONGELADO no momento da detecção
             )
         """)
+        # Migration: tabela criada antes do preço por evento
+        cur_fuel_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(byd_fuel_events)").fetchall()
+        }
+        if cur_fuel_cols and "price_per_l" not in cur_fuel_cols:
+            conn.execute("ALTER TABLE byd_fuel_events ADD COLUMN price_per_l REAL")
         conn.commit()
     finally:
         conn.close()
@@ -459,6 +466,20 @@ async def _maybe_poll_energy(client, vin: str):
         conn.close()
 
 
+def _current_fuel_price():
+    """Preço padrão do litro (car_fuel_price do tuya_config.json) para congelar
+    em novos abastecimentos — leitura tolerante: config é domínio do dashboard,
+    mas o carimbo precisa acontecer na DETECÇÃO, não na exibição."""
+    try:
+        cfg = json.loads(
+            (BASE_DIR / "data" / "tuya_config.json").read_text(encoding="utf-8")
+        )
+        v = cfg.get("car_fuel_price")
+        return float(v) if v is not None else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _update_fuel(snap: dict, moving: bool):
     """Detecta abastecimento: salto de ≥ FUEL_EVENT_DELTA_PP no nível do
     tanque (oil_percent) entre leituras com o carro parado. A baseline
@@ -482,9 +503,9 @@ def _update_fuel(snap: dict, moving: bool):
         delta = level - prev
         if delta >= FUEL_EVENT_DELTA_PP:
             conn.execute(
-                "INSERT INTO byd_fuel_events (ts, level_before, level_after, delta_pp)"
-                " VALUES (?,?,?,?)",
-                (int(snap["ts"]), prev, level, round(delta, 1)),
+                "INSERT INTO byd_fuel_events (ts, level_before, level_after, delta_pp, price_per_l)"
+                " VALUES (?,?,?,?,?)",
+                (int(snap["ts"]), prev, level, round(delta, 1), _current_fuel_price()),
             )
             print(
                 f"BYD: ⛽ abastecimento detectado: {prev:.0f}% → {level:.0f}% "
@@ -710,13 +731,13 @@ def monthly_trips(months: int = 3) -> dict:
 
 
 def fuel_events(days: int = 90) -> list[dict]:
-    """Abastecimentos detectados (Δpp de tanque); litros calculados na exibição
-    com car_tank_l do config."""
+    """Abastecimentos detectados (Δpp de tanque + preço congelado de cada um);
+    litros calculados na exibição com car_tank_l do config."""
     since = time.time() - max(1, min(int(days), 365)) * 86400
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         rows = conn.execute(
-            "SELECT ts, level_before, level_after, delta_pp "
+            "SELECT id, ts, level_before, level_after, delta_pp, price_per_l "
             "FROM byd_fuel_events WHERE ts >= ? ORDER BY ts DESC",
             (since,),
         ).fetchall()
@@ -725,11 +746,28 @@ def fuel_events(days: int = 90) -> list[dict]:
         return []
     return [
         {
-            "ts": r[0], "level_before": r[1], "level_after": r[2],
-            "delta_pp": r[3],
+            "id": r[0], "ts": r[1], "level_before": r[2], "level_after": r[3],
+            "delta_pp": r[4], "price": r[5],
         }
         for r in rows
     ]
+
+
+def set_fuel_price(event_id: int, price: float) -> bool:
+    """Corrige o preço de UM abastecimento (o valor oscila; cada evento guarda
+    o seu). False se o evento não existir (ex.: tabela ainda não criada)."""
+    try:
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        cur = conn.execute(
+            "UPDATE byd_fuel_events SET price_per_l = ? WHERE id = ?",
+            (float(price), int(event_id)),
+        )
+        conn.commit()
+        ok = cur.rowcount > 0
+        conn.close()
+        return ok
+    except (sqlite3.OperationalError, TypeError, ValueError):
+        return False
 
 
 def energy_graph() -> dict | None:

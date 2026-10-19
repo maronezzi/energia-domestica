@@ -3184,21 +3184,31 @@ def api_byd_trips(date: str = None):
 
 @app.get("/api/byd/fuel")
 def api_byd_fuel(days: int = 90):
-    """Abastecimentos detectados (saltos de nível ≥8pp) com litros/custo
-    estimados via car_tank_l/car_fuel_price, + gráfico BYD 7 dias."""
+    """Abastecimentos detectados (saltos de nível ≥8pp) — cada um com o SEU
+    preço congelado na detecção; litros via car_tank_l."""
     cfg = load_config()
     tank_l = float(cfg.get("car_tank_l") or 48)
-    price = cfg.get("car_fuel_price")
     events = byd_client.fuel_events(days)
     for e in events:
-        e["liters"] = round(e["delta_pp"] / 100 * tank_l, 1)
-        e["cost"] = round(e["liters"] * price, 2) if price else None
+        liters_raw = e["delta_pp"] / 100 * tank_l
+        e["liters"] = round(liters_raw, 1)
+        e["cost"] = round(liters_raw * e["price"], 2) if e.get("price") else None
     return {
         "events": events,
         "tank_l": tank_l,
-        "fuel_price": price,
+        "fuel_price": cfg.get("car_fuel_price"),
         "byd_graph": byd_client.energy_graph(),
     }
+
+
+@app.post("/api/byd/fuel/price")
+def api_byd_fuel_price(id: int = 0, price: float = 0):
+    """Corrige o preço de UM abastecimento — o combustível oscila e o preço
+    do config é só o padrão para eventos futuros, nunca retroativo."""
+    if id <= 0 or price <= 0:
+        return {"success": False, "error": "id e price (> 0) obrigatórios"}
+    ok = byd_client.set_fuel_price(id, price)
+    return {"success": ok, "id": id, "price": price}
 
 
 def _brt_month_keys(months: int) -> list[str]:
@@ -3239,19 +3249,23 @@ def api_byd_monthly(months: int = 3):
         ).fetchall()
     finally:
         conn.close()
+    # por mês: contagem, litros (Δpp × tanque) e custo com o preço DE CADA
+    # abastecimento — o valor oscila; o config nunca retroage sobre o histórico
     fuel: dict = {}
     for e in fevents:
         month = datetime.fromtimestamp(
             e["ts"] - 3 * 3600, tz=timezone.utc
         ).strftime("%Y-%m")
-        cnt, total = fuel.get(month, (0, 0.0))
-        fuel[month] = (cnt + 1, total + (e["delta_pp"] or 0.0))
+        cnt, liters_sum, cost_sum = fuel.get(month, (0, 0.0, 0.0))
+        liters = (e["delta_pp"] or 0.0) / 100 * tank_l
+        cost = liters * e["price"] if e.get("price") else 0.0
+        fuel[month] = (cnt + 1, liters_sum + liters, cost_sum + cost)
     home_m = {r[0]: (r[1] or 0.0, r[2] or 0.0) for r in crows}
     out = []
     for k in _brt_month_keys(months):
         t = trips.get(k, {})
-        f_cnt, f_pp = fuel.get(k, (0, 0.0))
-        liters = round(f_pp / 100 * tank_l, 1)
+        f_cnt, liters_raw, cost_raw = fuel.get(k, (0, 0.0, 0.0))
+        liters = round(liters_raw, 1)
         hk, hcost = home_m.get(k, (0.0, 0.0))
         out.append(
             {
@@ -3265,7 +3279,7 @@ def api_byd_monthly(months: int = 3):
                 "cost_home": round(hcost if hcost else hk * kwh_cost, 2),
                 "refuels": f_cnt,
                 "liters_fuel": liters,
-                "cost_fuel": round(liters * price, 2) if price else None,
+                "cost_fuel": round(cost_raw, 2) if cost_raw > 0 else None,
             }
         )
     return {"months": out, "tank_l": tank_l, "fuel_price": price}
