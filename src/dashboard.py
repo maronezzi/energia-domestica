@@ -130,6 +130,41 @@ def _ttl_put(key, value):
         _ttl_cache[key] = (time.time(), value)
 
 
+# Single-flight para agregados caros: com várias abas repolindo a cada 3s,
+# um TTL simples vira "thundering herd" — todas as chamadas concorrentes
+# perdem o cache ao mesmo tempo e CADA uma refaz a mesma integral, empilhando
+# threads do FastAPI até saturar a A20 (load 14 observado em 19/10). Aqui, no
+# máximo UM thread recomputa; os demais recebem o valor vigente, ainda que
+# vencido há poucos segundos — integrais de consumo são cumulativas, um
+# atraso de alguns segundos é invisível para o cabeçalho.
+_inflight: dict = {}
+_inflight_lock = threading.Lock()
+
+
+def _ttl_get_or_compute(key, ttl, fn):
+    hit = _ttl_get(key, ttl)
+    if hit is not None:
+        return hit
+    with _inflight_lock:
+        busy = _inflight.get(key, False)
+        if not busy:
+            _inflight[key] = True
+    if busy:
+        for _ in range(20):
+            stale = _ttl_get(key, 10 ** 12)
+            if stale is not None:
+                return stale
+            time.sleep(0.1)
+        return fn()  # primeira chamada da era (sem valor anterior nenhum)
+    try:
+        result = fn()
+        _ttl_put(key, result)
+        return result
+    finally:
+        with _inflight_lock:
+            _inflight[key] = False
+
+
 def _sql_kwh(conn, col: str, start: str, end: str, min_avg_w: float = 0.0) -> float:
     """Integrate power×time (kWh) entirely in SQL for [start, end).
 
@@ -2941,7 +2976,9 @@ def api_status():
 
 @app.get("/api/today")
 def api_today():
-    return db_today_stats()
+    # Integração power×tempo do dia + do mês a cada chamada: sem single-flight,
+    # 2 abas repolindo a cada 3s empilham as integrais e saturam a placa
+    return _ttl_get_or_compute(("today",), 15, db_today_stats)
 
 
 @app.get("/api/daily-history")
@@ -2950,12 +2987,7 @@ def api_daily_history(
 ):
     days = max(1, min(days, 365))
     key = ("daily_history", days, year, month)
-    cached = _ttl_get(key, 45)
-    if cached is not None:
-        return {"days": cached}
-    result = db_daily_history(days=days, year=year, month=month)
-    _ttl_put(key, result)
-    return {"days": result}
+    return {"days": _ttl_get_or_compute(key, 45, lambda: db_daily_history(days=days, year=year, month=month))}
 
 
 def db_monthly_stats(year: int, month: int):
@@ -3033,12 +3065,7 @@ def db_monthly_stats(year: int, month: int):
 @app.get("/api/monthly")
 def api_monthly(year: int, month: int):
     key = ("monthly", year, month)
-    cached = _ttl_get(key, 45)
-    if cached is not None:
-        return cached
-    result = db_monthly_stats(year, month)
-    _ttl_put(key, result)
-    return result
+    return _ttl_get_or_compute(key, 45, lambda: db_monthly_stats(year, month))
 
 
 @app.post("/api/cloud-sync")
@@ -3087,12 +3114,7 @@ def api_hourly(date: str = None):
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
     key = ("hourly", date)
-    cached = _ttl_get(key, 45)
-    if cached is not None:
-        return cached
-    result = db_hourly(date)
-    _ttl_put(key, result)
-    return result
+    return _ttl_get_or_compute(key, 45, lambda: db_hourly(date))
 
 
 @app.post("/api/breaker/on")

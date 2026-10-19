@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased] - 2026-10-19 (4)
+
+### Fixed
+- 🔥 **ESPIRAL DE SATURAÇÃO na A20: load 14, dashboard morto (/api/today estourava 30s)** — com o usuário abrindo DUAS abas do dashboard, `/api/today` (refazia DUAS integrais power×tempo A CADA chamada, sem cache nenhum, poll de 3s por aba) entrou em death spiral clássica: chamadas lentas → empilham threads do FastAPI (13 AnyIO workers a ~0,9s CPU/6s cada) → placa 0% idle → tudo mais lento → empilha mais. Sintoma reportado: tabela de viagens sem popular / custo comb. "—". **Fix: cache single-flight** (`_ttl_get_or_compute`): no máx. UM thread recomputa por chave; os demais recebem o valor vigente mesmo vencido há segundos (integrais de kWh são cumulativas — atraso de segundos é invisível). Aplicado a `/api/today` (TTL 15s — era 0 cache), `/api/daily-history`, `/api/hourly` e `/api/monthly` (TTL 45s que já existiam, agora à prova de rebanho). Resultado medido: load 11,6→**1,72** em 3 min; `/api/today` 13,5s fria → **0,02s** morna; hourly 8,5s → 0,03s. (o custo comb. em si nunca deixou de existir no backend: `car_fuel_price=6,19` no config e `/api/byd/trips` respondendo `cost_fuel=4,22` durante todo o incidente)
+- 🧹 DeprecationWarnings de `datetime.utcnow()` no service.err anotadas para limpeza futura (não afetam função).
+
 ## [Unreleased] - 2026-10-19 (3)
 
 ### Changed
