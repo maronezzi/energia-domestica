@@ -814,10 +814,9 @@ carro —</div></div></div>
                         <th>Início</th><th>Duração</th><th>Km</th><th>SOC</th>
                         <th title="kWh da queda de SOC ÷ η × tarifa — o que custa repor na tomada">Custo EV</th>
                         <th title="km × L/100km médio da BYD × último preço de combustível">Custo comb.</th>
-                        <th>Trajeto</th>
                     </tr></thead>
                     <tbody id="bydTripsTbody">
-                        <tr><td colspan="7" style="text-align:center;color:var(--dim);padding:1.2rem">Sem viagens registradas ainda.</td></tr>
+                        <tr><td colspan="6" style="text-align:center;color:var(--dim);padding:1.2rem">Sem viagens registradas ainda.</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1907,7 +1906,7 @@ function renderBydDiario(day, positions, trips, daily) {
     // tabela de viagens
     const tb = document.getElementById('bydTripsTbody');
     if (!trips.length) {
-        tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:1.2rem">' +
+        tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:1.2rem">' +
             (isToday ? 'Nenhuma viagem hoje (ainda).' : 'Nenhuma viagem neste dia.') + '</td></tr>';
     } else {
         tb.innerHTML = trips.map(t => {
@@ -1917,16 +1916,9 @@ function renderBydDiario(day, positions, trips, daily) {
             const soc = (t.soc_start != null && t.soc_end != null) ? Math.round(t.soc_start) + '% → ' + Math.round(t.soc_end) + '%' : '—';
             const cev = t.cost_ev > 0 ? fmtR(t.cost_ev) : '—';
             const cf = (t.cost_fuel != null && t.cost_fuel > 0) ? fmtR(t.cost_fuel) : '—';
-            let tag;
-            if (t.depart_home) tag = '🛫 saiu de casa';
-            else if (t.arrive_home) tag = '🏠 chegou em casa';
-            else if (t.start_lat != null && home) {
-                const dk = bydHomeDistKm(t.start_lat, t.start_lon);
-                tag = dk != null ? 'a ' + dk.toFixed(1) + ' km de casa' : '';
-            } else tag = '';
             return '<tr><td>' + ini + ' → ' + fim + '</td><td>' + dur + ' min</td><td><b>' +
                 Number(t.km).toLocaleString('pt-BR') + ' km</b></td><td>' + soc + '</td>' +
-                '<td>' + cev + '</td><td>' + cf + '</td><td>' + tag + '</td></tr>';
+                '<td>' + cev + '</td><td>' + cf + '</td></tr>';
         }).join('');
     }
 }

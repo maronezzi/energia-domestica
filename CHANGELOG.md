@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-19 (3)
+
+### Changed
+- 🧹 **Tabela de viagens: coluna "Trajeto" removida (pedido do dono) e custo de combustível ATIVO** — o custo comb. já existia mas ficava em "—" sem preço configurado; gravado `car_fuel_price = 6,19` no config da placa via `/api/config` como ponto de partida (o dono ajusta na ⚙️ Config com o preço real da região — retroage só sobre viagens futuras, cada abastecimento continua com seu preço congelado). A viagem real da manhã virou a mostrar os dois custos: EV R$ 2,40 + combustível R$ 4,22 (17 km × 3,9 L/100km médio BYD × 6,19). O trajeto segue no mapa acima da tabela, que agora tem 6 colunas.
+
 ## [Unreleased] - 2026-10-19 (2)
 
 ### Added
