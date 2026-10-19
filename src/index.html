@@ -813,7 +813,7 @@ carro —</div></div></div>
                     <thead><tr>
                         <th>Início</th><th>Duração</th><th>Km</th><th>SOC</th>
                         <th title="kWh da queda de SOC ÷ η × tarifa — o que custa repor na tomada">Custo EV</th>
-                        <th title="km × L/100km médio da BYD × último preço de combustível">Custo comb.</th>
+                        <th title="Só quando os km excedem o que a bateria explica (ΔSOC ÷ consumo EV) — viagem urbana em EV não queima gasolina">Custo comb.</th>
                     </tr></thead>
                     <tbody id="bydTripsTbody">
                         <tr><td colspan="6" style="text-align:center;color:var(--dim);padding:1.2rem">Sem viagens registradas ainda.</td></tr>
@@ -821,7 +821,7 @@ carro —</div></div></div>
                 </table>
             </div>
             <div style="color:var(--dim);font-size:.8rem;margin-top:.4rem">
-                Custos estimados: EV pela energia gasta (ΔSOC) com a tarifa da tomada · combustível pelo consumo médio da BYD e o último preço informado — híbrido decide sozinho quando usa cada um.
+                Custos estimados: EV pela energia gasta (ΔSOC) com a tarifa da tomada · combustível SÓ quando os km excedem o que a bateria explica (o DM-i urbano roda em EV; o motor a gasolina entra em estrada/carga alta).
             </div>
             <div style="height:260px;margin-top:1rem">
                 <canvas id="chartBydDaily"></canvas>

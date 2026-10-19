@@ -3195,8 +3195,9 @@ def api_byd_positions(date: str = None):
 def api_byd_trips(date: str = None):
     """Viagens derivadas de um dia local (date='YYYY-MM-DD' BRT; default: hoje)
     com custo estimado por viagem: energia (ΔSOC ÷ η × tarifa — o que custa
-    repor na tomada) e combustível (km × L/100km médio BYD × último preço
-    congelado), quando há preço e consumo conhecidos."""
+    repor na tomada) e combustível SOMENTE quando os km excedem o que a bateria
+    explica (DM-i urbano em EV não queima gasolina; o motor a combustão entra
+    quando a viagem pede mais do que a bateria dá)."""
     if date is None:
         date = _brt_today()
     else:
@@ -3220,6 +3221,14 @@ def api_byd_trips(date: str = None):
         vals = [v for v in (sg.get("energy_consumption") or []) if v and v > 0]
         if vals:
             cons_l_per_100 = sum(vals) / len(vals)
+    # Consumo EV de referência: primeiro o recente (últ. 50 km, realtime),
+    # senão a média de vida da BYD; sem nenhum dos dois não dá para separar
+    # EV × combustível com honestidade e o combustível fica em zero.
+    ev_cons = byd_client.status()["snapshot"].get("cons_ev_recent")
+    if not ev_cons:
+        cum = ((byd_client.energy_graph() or {}).get(
+            "cumulative_energy_consumption") or {})
+        ev_cons = cum.get("avg_ev_consumption")
     for t in trips:
         s1, s2 = t.get("soc_start"), t.get("soc_end")
         kwh_bat = (
@@ -3229,12 +3238,18 @@ def api_byd_trips(date: str = None):
         )
         t["kwh_ev"] = round(kwh_bat, 2)
         t["cost_ev"] = round(kwh_bat / eta * kwh_cost, 2) if kwh_bat > 0 else 0.0
-        liters = t["km"] * cons_l_per_100 / 100.0 if cons_l_per_100 else None
-        t["liters_fuel"] = round(liters, 2) if liters is not None else None
+        # km que a bateria explica × margem de 15% (SOC da BYD é inteiro:
+        # 1 p.p. ≈ 1,3 km — sem a margem, ruído viraria gasolina inventada)
+        fuel_km = 0.0
+        if ev_cons and kwh_bat > 0:
+            ev_km_cap = kwh_bat / ev_cons * 100.0
+            fuel_km = max(0.0, t["km"] - ev_km_cap * 1.15)
+        if fuel_km < 1.0:  # abaixo disso é ruído, não motor a combustão
+            fuel_km = 0.0
+        liters = fuel_km * cons_l_per_100 / 100.0 if (cons_l_per_100 and fuel_km) else 0.0
+        t["liters_fuel"] = round(liters, 2)
         t["cost_fuel"] = (
-            round(liters * last_fuel_price, 2)
-            if (liters is not None and last_fuel_price)
-            else None
+            round(liters * last_fuel_price, 2) if (liters and last_fuel_price) else 0.0
         )
     return {"date": date, "trips": trips}
 

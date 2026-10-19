@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-19 (5)
+
+### Changed
+- ⛽ **"Custo comb." por viagem agora só existe quando há EVIDÊNCIA de gasolina** — o cálculo anterior (commit 14b8554) atribuía `km × L/100km médio BYD` a TODA viagem: 17 km urbanos 100% elétricos apareciam com R$ 4,22 de combustível que não queimou (o dono flagrou: "o custo foi somente o EV"). Novo critério físico da **suficiência da bateria**: a viagem explica até `ΔSOC × bateria ÷ consumo EV recente (últ. 50 km do realtime; fallback média de vida BYD) × margem de 15%` km em elétrico — combustível é só o excedente de ≥ 1 km (SOC da BYD é inteiro: 1 p.p. ≈ 1,3 km; sem a margem, ruído vira gasolina inventada). Nas 2 viagens reais do dia: bateria cobria 20,4 km e 10,7 km para 17 e 11 km rodados → combustível zero em ambas (antes: R$ 4,22 + R$ 2,73 inventados). Abastecimentos reais (saltos de tanque) continuam sendo a fonte verdadeira de custo de combustível; este é o estimado por viagem. Tooltip e rodapé da tabela atualizados.
+
 ## [Unreleased] - 2026-10-19 (4)
 
 ### Fixed
