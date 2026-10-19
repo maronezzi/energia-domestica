@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-19 (6)
+
+### Fixed
+- 🕐 **"Tempo até cheia" nunca mostrava nada — e nunca vai mostrar da BYD** — o card usa os campos `full_hour`/`full_minute` do realtime BYD, mas para este carro a API manda **sempre -1** (sentinela de vazio: 0 de 159 snapshots tiveram dado; confirmado também no dump da homepage de carga). Agora, durante a carga, o card cai para a **estimativa do modelo de carga** (a mesma do "⚡ Estimativa até a meta" da Dashboard: energia até o alvo ÷ potência da tomada), marcada com "≈" e tooltip explicando a fonte — quando a BYD um dia mandar o campo próprio, ele tem precedência. Sem carga ativa, continua "—".
+
 ## [Unreleased] - 2026-10-19 (5)
 
 ### Changed

@@ -1776,7 +1776,20 @@ function renderByd(st, pts) {
         tp.length === 4 ? tp.map(v => v != null ? Math.round(v) : '—').join('/') + ' ' + tu : '—';
 
     // Resumo
-    document.getElementById('bydTTF').textContent = snap.time_to_full_min != null ? fmtAge(snap.time_to_full_min * 60) : '—';
+    // Tempo até cheia: a BYD manda o campo próprio quando quer; para este carro
+    // ele NUNCA vem (0/159 snapshots, fullHour=-1) — usa a estimativa do modelo
+    // de carga (a mesma do "ESTIMATIVA ATÉ META" da Dashboard), marcada com ≈
+    const ttfEl = document.getElementById('bydTTF');
+    if (snap.time_to_full_min != null) {
+        ttfEl.textContent = fmtAge(snap.time_to_full_min * 60);
+        ttfEl.title = 'Estimativa da própria BYD';
+    } else if (lastCharge && lastCharge.charging && lastCharge.estimated_remaining_minutes > 0) {
+        ttfEl.textContent = '≈ ' + fmtAge(lastCharge.estimated_remaining_minutes * 60);
+        ttfEl.title = 'Estimativa do modelo de carga (potência da tomada até a meta) — a BYD não fornece tempo até cheia para este carro';
+    } else {
+        ttfEl.textContent = '—';
+        ttfEl.title = 'Sem carga ativa';
+    }
     document.getElementById('bydCons').textContent = snap.cons_ev_recent != null ? snap.cons_ev_recent.toFixed(1) + ' kWh/100km' : '—';
     document.getElementById('bydOdo').textContent = snap.odo_km != null ? Math.round(snap.odo_km).toLocaleString('pt-BR') + ' km' : '— km';
     document.getElementById('bydOdo2').textContent = snap.odo_km != null ? Math.round(snap.odo_km).toLocaleString('pt-BR') + ' km' : '—';
