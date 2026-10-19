@@ -743,6 +743,51 @@ carro —</div></div></div>
         </div>
 
         <div class="card" style="margin-top:1rem">
+            <h2>⛽ Combustível</h2>
+            <div class="charge-summary" style="margin:.6rem 0">
+                <div class="cs-card"><div class="cs-card-lbl">Tanque</div><div class="cs-card-val" id="fuelTankPct">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl">Estimado no tanque</div><div class="cs-card-val" id="fuelTankL">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl">Autonomia comb.</div><div class="cs-card-val" id="fuelRange">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl" title="Média dos dias rodados, direto da BYD">Consumo BYD (7d)</div><div class="cs-card-val" id="fuelCons7d">—</div></div>
+            </div>
+            <div style="height:180px;margin-top:.6rem">
+                <canvas id="chartFuelLevel"></canvas>
+            </div>
+            <div style="color:var(--dim);font-size:.8rem;margin-top:.4rem">
+                Nível do tanque (7 dias) — quedas são consumo; saltos de ≥ 8% viram abastecimento automático.
+            </div>
+            <h3 style="margin:1rem 0 .4rem">Abastecimentos detectados</h3>
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead><tr><th>Data</th><th>Tanque</th><th>Estimativa</th><th>Custo</th></tr></thead>
+                    <tbody id="fuelTbody">
+                        <tr><td colspan="4" style="text-align:center;color:var(--dim);padding:1.2rem">Nenhum abastecimento detectado ainda.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="fuelConfigHint" style="color:var(--warn);font-size:.85rem;margin-top:.6rem;display:none">
+                ⚠️ Informe o preço do litro e a capacidade do tanque na aba ⚙️ Config para ver os litros e o R$ de cada abastecimento.
+            </div>
+        </div>
+
+        <div class="card" style="margin-top:1rem">
+            <h2>📊 Mensal — híbrido: EV + combustível</h2>
+            <div class="table-wrap" style="margin-top:.6rem">
+                <table class="data-table">
+                    <thead><tr>
+                        <th>Mês</th><th>Km</th><th>Viagens</th><th>kWh EV</th><th>kWh tomada</th><th>Custo tomada</th><th>Abastec.</th><th>Combustível</th><th>Custo comb.</th>
+                    </tr></thead>
+                    <tbody id="monthlyTbody">
+                        <tr><td colspan="9" style="text-align:center;color:var(--dim);padding:1.2rem">Carregando...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div style="color:var(--dim);font-size:.8rem;margin-top:.4rem">
+                kWh EV estimado pela queda real de SOC (ΔSOC × bateria) · litros estimados pelo salto de nível no abastecimento × capacidade do tanque.
+            </div>
+        </div>
+
+        <div class="card" style="margin-top:1rem">
             <h2>🧭 Diário de Bordo <span class="badge badge-blue" id="bydAtHome">—</span></h2>
             <div style="display:flex;gap:.5rem;align-items:center;margin:.8rem 0 .5rem;flex-wrap:wrap">
                 <button class="soc-preset" onclick="bydShiftDay(-1)">◀</button>
@@ -759,7 +804,7 @@ carro —</div></div></div>
                 <div class="cs-card"><div class="cs-card-lbl">kWh na tomada</div><div class="cs-card-val" id="bydDayHomeKwh">—</div></div>
                 <div class="cs-card"><div class="cs-card-lbl">Custo tomada</div><div class="cs-card-val" style="color:var(--ok)" id="bydDayCost">—</div></div>
             </div>
-            <div id="bydMap" style="height:280px;border-radius:10px;border:1px solid rgba(255,255,255,.06)"></div>
+            <div id="bydMap" style="height:430px;border-radius:10px;border:1px solid rgba(255,255,255,.06)"></div>
             <div class="table-wrap" style="margin-top:.8rem">
                 <table class="data-table">
                     <thead><tr><th>Início</th><th>Duração</th><th>Km</th><th>SOC</th><th>Trajeto</th></tr></thead>
@@ -768,10 +813,10 @@ carro —</div></div></div>
                     </tbody>
                 </table>
             </div>
-            <div style="height:200px;margin-top:1rem">
+            <div style="height:260px;margin-top:1rem">
                 <canvas id="chartBydDaily"></canvas>
             </div>
-            <div style="color:var(--dim);font-size:.8rem;margin-top:.4rem">
+            <div style="color:var(--dim);font-size:.9rem;margin-top:.4rem">
                 Últimos 14 dias: barras = km rodados · linha = kWh/100km EV estimado (ΔSOC × bateria). A "casa" é aprendida automaticamente das posições do carro; viagens com ≥ 0,2 km.
             </div>
         </div>
@@ -786,6 +831,13 @@ carro —</div></div></div>
         <div class="s-row"><div class="s-label"><div>Custo atual</div></div><div class="s-input"><span style="color:var(--dim)">R$</span><input id="kwhDisplay" readonly style="background:transparent;border:none;color:var(--accent);font-weight:700"></div></div>
         <div style="margin-top:1rem"><button class="btn-save" onclick="saveKwh()">💾 Salvar</button></div>
         <div class="alert ok" id="settingsOk" style="display:none">✅ Salvo!</div>
+    </div>
+    <div class="settings">
+        <h3>⛽ Combustível (BYD híbrido)</h3>
+        <div class="s-row"><div class="s-label"><div>Preço do litro</div><div class="desc">Gasolina na sua região — custo dos abastecimentos detectados</div></div><div class="s-input"><span style="color:var(--dim)">R$</span><input type="text" id="fuelPriceInput" inputmode="decimal" pattern="[0-9]*[.,]?[0-9]{0,3}" min="0" placeholder="6,19"></div></div>
+        <div class="s-row"><div class="s-label"><div>Capacidade do tanque</div><div class="desc">Litros — estima quantos litros entraram em cada abastecimento (Song Pro DM-i ≈ 48 L)</div></div><div class="s-input"><input type="text" id="tankInput" inputmode="decimal" pattern="[0-9]*[.,]?[0-9]{0,2}" min="0"> <span style="color:var(--dim)">L</span></div></div>
+        <div style="margin-top:1rem"><button class="btn-save" onclick="saveFuel()">💾 Salvar</button></div>
+        <div class="alert ok" id="fuelOk" style="display:none">✅ Salvo!</div>
     </div>
 </div>
 </main>
@@ -1641,10 +1693,12 @@ async function loadByd() {
     try {
         const [st, hist] = await Promise.all([
             fetch('/api/byd/status').then(r => r.json()),
-            fetch('/api/byd/history?hours=24').then(r => r.json())
+            fetch('/api/byd/history?hours=168').then(r => r.json())
         ]);
         renderByd(st, hist.points || []);
         loadBydDiario();
+        loadFuelData();
+        loadMonthly();
     } catch (e) {
         document.getElementById('bydOff').style.display = 'block';
         document.getElementById('bydMain').style.display = 'none';
@@ -1718,10 +1772,23 @@ function renderByd(st, pts) {
     document.getElementById('bydOdo2').textContent = snap.odo_km != null ? Math.round(snap.odo_km).toLocaleString('pt-BR') + ' km' : '—';
     document.getElementById('bydFresh').textContent = st.last_ok_ts ? 'coleta há ' + fmtAge(st.poll_age_s) : 'sem coleta';
 
-    // Gráfico SOC 24h
-    cBydSoc.data.labels = pts.map(p => new Date(p.ts * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'}));
-    cBydSoc.data.datasets[0].data = pts.map(p => p.soc);
+    // Gráfico SOC 24h (fatia do histórico de 7 dias usado também pelo tanque)
+    const cutoff = Date.now() / 1000 - 24 * 3600;
+    const pts24 = pts.filter(p => p.ts >= cutoff);
+    cBydSoc.data.labels = pts24.map(p => new Date(p.ts * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'}));
+    cBydSoc.data.datasets[0].data = pts24.map(p => p.soc);
     cBydSoc.update();
+
+    // Combustível (híbrido: braço que falta na análise diária)
+    const tank = st.tank_l || 48;
+    const lvl = snap.oil_percent;
+    document.getElementById('fuelTankPct').textContent = lvl != null ? Math.round(lvl) + '%' : '—';
+    document.getElementById('fuelTankL').textContent = lvl != null ? (lvl / 100 * tank).toFixed(0) + ' L' : '—';
+    document.getElementById('fuelRange').textContent = snap.range_oil != null ? Math.round(snap.range_oil).toLocaleString('pt-BR') + ' km' : '—';
+    const fpts = pts.filter(p => p.oil_percent != null);
+    cFuelLevel.data.labels = fpts.map(p => new Date(p.ts * 1000).toLocaleString('pt-BR', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}));
+    cFuelLevel.data.datasets[0].data = fpts.map(p => p.oil_percent);
+    cFuelLevel.update();
 }
 
 // ─── Diário de Bordo (fase 2) ────────────────────────────────
@@ -1849,10 +1916,93 @@ function renderBydDiario(day, positions, trips, daily) {
     }
 }
 
+// ─── Combustível e Mensal (híbrido) ──────────────────────────
+let cFuelLevel;
+
+function initFuelLevelChart() {
+    cFuelLevel = new Chart(document.getElementById('chartFuelLevel'), {
+        type: 'line',
+        data: {labels: [], datasets: [{label: 'Tanque %', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.12)', fill: true, tension: .2, pointRadius: 2, spanGaps: true}]},
+        options: {responsive: true, maintainAspectRatio: false, animation: {duration: 200},
+            plugins: {legend: {display: false}},
+            scales: {x: {ticks: {color: '#64748b', maxTicksLimit: 8}, grid: {color: 'rgba(255,255,255,.03)'}},
+                     y: {min: 0, max: 100, ticks: {color: '#64748b'}, grid: {color: 'rgba(255,255,255,.03)'}}}}
+    });
+}
+
+async function loadFuelData() {
+    try {
+        const f = await fetch('/api/byd/fuel').then(r => r.json());
+        const evs = f.events || [];
+        const tb = document.getElementById('fuelTbody');
+        if (!evs.length) {
+            tb.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--dim);padding:1.2rem">Nenhum abastecimento desde que a coleta começou — o salto de nível no gráfico acima marca um automaticamente.</td></tr>';
+        } else {
+            tb.innerHTML = evs.map(e => {
+                const d = new Date(e.ts * 1000);
+                const dt = d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
+                return '<tr><td>' + dt + '</td><td>' + Math.round(e.level_before) + '% → ' + Math.round(e.level_after) + '%</td><td><b>+' +
+                    (e.liters != null ? e.liters.toFixed(1) : '—') + ' L</b></td><td>' + (e.cost != null ? fmtR(e.cost) : '—') + '</td></tr>';
+            }).join('');
+        }
+        document.getElementById('fuelConfigHint').style.display = (!f.fuel_price) ? 'block' : 'none';
+        // consumo BYD 7 dias (perna combustível do gráfico nativo)
+        const g = f.byd_graph && f.byd_graph.self_graph;
+        if (g && Array.isArray(g.energy_consumption) && g.energy_consumption.length) {
+            const vals = g.energy_consumption.filter(v => v > 0);
+            const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+            document.getElementById('fuelCons7d').textContent = avg != null ? avg.toFixed(1) + ' L/100km' : '—';
+        }
+    } catch (e) { /* best-effort */ }
+}
+
+async function loadMonthly() {
+    try {
+        const m = await fetch('/api/byd/monthly?months=3').then(r => r.json());
+        const tb = document.getElementById('monthlyTbody');
+        tb.innerHTML = (m.months || []).map(x => {
+            const nome = MES[parseInt(x.month.slice(5), 10) - 1] + '/' + x.month.slice(2, 4);
+            const c = (v, suf, dec) => (v > 0 ? v.toFixed(dec ?? 1) + (suf ? ' ' + suf : '') : '—');
+            return '<tr><td><b>' + nome + '</b></td>' +
+                '<td>' + x.km.toLocaleString('pt-BR') + ' km</td>' +
+                '<td>' + x.trips + '</td>' +
+                '<td>' + c(x.kwh_ev, 'kWh') + '</td>' +
+                '<td>' + c(x.kwh_home, 'kWh', 2) + '</td>' +
+                '<td>' + (x.cost_home > 0 ? fmtR(x.cost_home) : '—') + '</td>' +
+                '<td>' + x.refuels + '</td>' +
+                '<td>' + c(x.liters_fuel, 'L') + '</td>' +
+                '<td>' + (x.cost_fuel != null && x.cost_fuel > 0 ? fmtR(x.cost_fuel) : '—') + '</td></tr>';
+        }).join('');
+    } catch (e) { /* best-effort */ }
+}
+
+// ─── Config do combustível (aba Config) ──────────────────────
+async function loadFuelConfig() {
+    try {
+        const c = await fetch('/api/config').then(r => r.json());
+        document.getElementById('fuelPriceInput').value = c.car_fuel_price ?? '';
+        document.getElementById('tankInput').value = c.car_tank_l ?? 48;
+    } catch (e) {}
+}
+
+async function saveFuel() {
+    const price = parseFloat(document.getElementById('fuelPriceInput').value.replace(',', '.'));
+    const tank = parseFloat(document.getElementById('tankInput').value.replace(',', '.'));
+    const body = {};
+    if (!isNaN(price) && price > 0) body.car_fuel_price = price;
+    if (!isNaN(tank) && tank > 0) body.car_tank_l = tank;
+    if (!Object.keys(body).length) return;
+    await fetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const a = document.getElementById('fuelOk');
+    a.style.display = 'block'; setTimeout(() => a.style.display = 'none', 3000);
+}
+
 // Init
 initCharts();
 initBydChart();
 initBydDailyChart();
+initFuelLevelChart();
+loadFuelConfig();
 fetchStatus();
 refreshChargeState();
 loadHourly();

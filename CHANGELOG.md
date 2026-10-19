@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] - 2026-10-18 (3)
+
+### Added
+- ⛽ **Análise de COMBUSTÍVEL (o braço que faltava no híbrido)** — o Song Pro DM-i queima gasolina E eletricidade; até hoje só o lado elétrico era analisado. **Abastecimento detectado automaticamente**: salto de ≥ 8 p.p. no nível do tanque (`oil_percent`) entre leituras com o carro parado → `byd_fuel_events` (nível antes/depois/Δpp); baseline em `byd_meta.fuel_level` acompanha o consumo normal e NÃO atualiza em movimento (o nível balança — o evento é confirmado no próximo ciclo parado). **Litros estimados na exibição** (`Δpp ÷ 100 × car_tank_l`, default 48 L p/ Song Pro DM-i) e **custo com `car_fuel_price`** — ambos configuráveis na aba ⚙️ Config, nova seção "⛽ Combustível" (preço do litro + capacidade do tanque, whitelist do `/api/config` estendida); litros ficam em Δpp gravado, então corrigir o tanque no config retroage certo sobre o histórico. Card "⛽ Combustível" na aba Carro: nível atual, litros estimados no tanque, autonomia de combustível (`oil_endurance`), **média L/100km dos dias rodados direto do gráfico nativo BYD 7 dias** (perna combustível — a lib não aceita `powerType`, o braço EV segue por ΔSOC), gráfico de nível de 7 dias (quedas = consumo, saltos = abastecimento) e tabela de abastecimentos com litros/R$ (hint amarelo pede o preço enquanto não configurado).
+- 📊 **Análise MENSAL híbrida** — `/api/byd/monthly?months=3` cruza três fontes por mês BRT: km/viagens/kWh EV (ΔSOC) das viagens BYD, kWh/R$ da tomada (`charge_sessions`, fallback R$ = kWh × tarifa) e abastecimentos/L/R$ de combustível. Tabela "📊 Mensal — híbrido: EV + combustível" com os últimos 3 meses (o histórico elétrico real já aparece de cara: Ago 43,6 kWh/R$ 41,69 · Set 118,5/R$ 109,20 · Out 84,2/R$ 77,21). `history()` agora expõe `oil_percent`, e o `/api/byd/fuel` devolve eventos + configuração + gráfico BYD.
+- 🖥️ **Diário de bordo maior** — mapa 280→430 px e gráfico de 14 dias 200→260 px, notas de rodapé maiores (0.8→0.9rem).
+
+### Fixed
+- 🐛 **`/api/byd/monthly` dava 500 quando `byd_fuel_events` ainda não existia** (instalação nova / poller desligado): a query crua de eventos foi trocada pelo leitor `fuel_events()` do módulo, que já degrada para lista vazia. Boot local agora exercita TODOS os endpoints BYD.
+
 ## [Unreleased] - 2026-10-18 (2)
 
 ### Added

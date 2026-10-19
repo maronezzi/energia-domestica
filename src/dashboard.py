@@ -82,6 +82,8 @@ DEFAULT_CONFIG = {
     "car_charge_start_power_w": 500,  # Power threshold to auto-detect charging started
     "car_charge_auto_stop": True,  # Auto-stop when done
     "car_charge_efficiency": 0.85,  # Charging efficiency (grid→battery). Tune to match car app estimate.
+    "car_fuel_price": None,  # R$/L do combustível — dono informa na aba Config
+    "car_tank_l": 48,  # capacidade do tanque (Song Pro DM-i ≈ 48 L) — estima litros abastecidos
     "cloud_enabled": False,  # Cloud OFF by default - user decides
 }
 # 17280 leituras/dia a 5s → ~29 dias de histórico bruto antes do prune
@@ -3138,6 +3140,8 @@ def api_byd_status():
     cfg = load_config()
     st = byd_client.status()
     st["model_soc"] = cfg.get("car_current_soc")
+    st["tank_l"] = cfg.get("car_tank_l")
+    st["fuel_price"] = cfg.get("car_fuel_price")
     return st
 
 
@@ -3176,6 +3180,95 @@ def api_byd_trips(date: str = None):
         except ValueError:
             raise HTTPException(status_code=400, detail="date deve ser YYYY-MM-DD")
     return {"date": date, "trips": byd_client.trips_for_day(date)}
+
+
+@app.get("/api/byd/fuel")
+def api_byd_fuel(days: int = 90):
+    """Abastecimentos detectados (saltos de nível ≥8pp) com litros/custo
+    estimados via car_tank_l/car_fuel_price, + gráfico BYD 7 dias."""
+    cfg = load_config()
+    tank_l = float(cfg.get("car_tank_l") or 48)
+    price = cfg.get("car_fuel_price")
+    events = byd_client.fuel_events(days)
+    for e in events:
+        e["liters"] = round(e["delta_pp"] / 100 * tank_l, 1)
+        e["cost"] = round(e["liters"] * price, 2) if price else None
+    return {
+        "events": events,
+        "tank_l": tank_l,
+        "fuel_price": price,
+        "byd_graph": byd_client.energy_graph(),
+    }
+
+
+def _brt_month_keys(months: int) -> list[str]:
+    """Últimos N meses locais (BRT) como 'YYYY-MM', cronológico."""
+    now = datetime.utcnow() - timedelta(hours=3)
+    y, m = now.year, now.month
+    keys = []
+    for _ in range(months):
+        keys.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    return list(reversed(keys))
+
+
+@app.get("/api/byd/monthly")
+def api_byd_monthly(months: int = 3):
+    """Análise mensal do híbrido: km/viagens/kWh EV (viagens BYD), kWh/R$ da
+    tomada (charge_sessions) e abastecimentos/L/R$ de combustível."""
+    months = max(1, min(months, 12))
+    cfg = load_config()
+    tank_l = float(cfg.get("car_tank_l") or 48)
+    price = cfg.get("car_fuel_price")
+    kwh_cost = cfg.get("kwh_cost", 0.956)
+    trips = byd_client.monthly_trips(months)
+    since_iso = (
+        datetime.utcnow() - timedelta(hours=3) - timedelta(days=months * 31)
+    ).isoformat()
+    fevents = byd_client.fuel_events(days=months * 31 + 5)
+    conn = get_db()
+    try:
+        crows = conn.execute(
+            "SELECT substr(start_time,1,7), SUM(energy_delivered_kwh), "
+            "SUM(total_cost) FROM charge_sessions "
+            "WHERE start_time >= ? AND status IN ('completed','auto_stopped') "
+            "GROUP BY substr(start_time,1,7)",
+            (since_iso,),
+        ).fetchall()
+    finally:
+        conn.close()
+    fuel: dict = {}
+    for e in fevents:
+        month = datetime.fromtimestamp(
+            e["ts"] - 3 * 3600, tz=timezone.utc
+        ).strftime("%Y-%m")
+        cnt, total = fuel.get(month, (0, 0.0))
+        fuel[month] = (cnt + 1, total + (e["delta_pp"] or 0.0))
+    home_m = {r[0]: (r[1] or 0.0, r[2] or 0.0) for r in crows}
+    out = []
+    for k in _brt_month_keys(months):
+        t = trips.get(k, {})
+        f_cnt, f_pp = fuel.get(k, (0, 0.0))
+        liters = round(f_pp / 100 * tank_l, 1)
+        hk, hcost = home_m.get(k, (0.0, 0.0))
+        out.append(
+            {
+                "month": k,
+                "km": t.get("km", 0.0),
+                "trips": t.get("trips", 0),
+                "kwh_ev": t.get("kwh_ev", 0.0),
+                "kwh_per_100km": t.get("kwh_per_100km"),
+                "hours": t.get("hours", 0.0),
+                "kwh_home": round(hk, 2),
+                "cost_home": round(hcost if hcost else hk * kwh_cost, 2),
+                "refuels": f_cnt,
+                "liters_fuel": liters,
+                "cost_fuel": round(liters * price, 2) if price else None,
+            }
+        )
+    return {"months": out, "tank_l": tank_l, "fuel_price": price}
 
 
 @app.get("/api/byd/daily")
@@ -3541,6 +3634,8 @@ def api_config_update(cfg: dict = None):
         "car_charge_start_power_w",
         "car_charge_auto_stop",
         "car_charge_efficiency",
+        "car_fuel_price",
+        "car_tank_l",
         "cloud_enabled",
     }
     safe_cfg = {k: v for k, v in cfg.items() if k in ALLOWED_CONFIG_KEYS}

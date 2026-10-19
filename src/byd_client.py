@@ -52,6 +52,7 @@ HOME_REFRESH_DAYS = 7       # reaprende onde o carro dorme a cada 7 dias
 HOME_LOOKBACK_DAYS = 7
 ENERGY_POLL_MAX_AGE = 20 * 3600  # gráfico BYD 7 dias: 1x ao dia
 BRT_OFFSET_S = -3 * 3600    # Brasil sem horário de verão (placa sem tzdata)
+FUEL_EVENT_DELTA_PP = 8.0   # salto de nível (%) que caracteriza abastecimento
 
 # Chaves do byd.json que viram campos de BydConfig (o modelo rejeita extras).
 CFG_KEYS = (
@@ -161,6 +162,13 @@ def init_db():
             CREATE TABLE IF NOT EXISTS byd_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS byd_fuel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER,                  -- epoch UTC da detecção
+                level_before REAL, level_after REAL, delta_pp REAL
             )
         """)
         conn.commit()
@@ -434,7 +442,9 @@ def _update_trip(snap: dict, pos: dict | None, moving: bool):
 
 
 async def _maybe_poll_energy(client, vin: str):
-    """Gráfico de consumo dos últimos 7 dias direto da BYD — 1x ao dia."""
+    """Gráfico de consumo dos últimos 7 dias direto da BYD — 1x ao dia.
+    (A assinatura da lib não aceita powerType: a perna do gráfico é a que a
+    BYD mandar — combustível no DM-i; o consumo EV é calculado por ΔSOC.)"""
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     try:
         last = _meta_get(conn, "energy_last_ts")
@@ -445,6 +455,43 @@ async def _maybe_poll_energy(client, vin: str):
         _meta_set(conn, "energy_last_ts", int(time.time()))
         conn.commit()
         print("BYD: gráfico de consumo 7 dias atualizado")
+    finally:
+        conn.close()
+
+
+def _update_fuel(snap: dict, moving: bool):
+    """Detecta abastecimento: salto de ≥ FUEL_EVENT_DELTA_PP no nível do
+    tanque (oil_percent) entre leituras com o carro parado. A baseline
+    (byd_meta.fuel_level) segue o consumo normal; em movimento não atualiza —
+    nível balança e o abastecimento é confirmado no próximo ciclo parado.
+    Litros ficam em Δpp — convertidos com car_tank_l na hora de exibir, para
+    o dono corrigir a capacidade sem perder histórico."""
+    level = snap.get("oil_percent")
+    if level is None:
+        return
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    try:
+        raw = _meta_get(conn, "fuel_level")
+        if moving:
+            return
+        prev = float(raw) if raw is not None else None
+        if prev is None:
+            _meta_set(conn, "fuel_level", level)
+            conn.commit()
+            return
+        delta = level - prev
+        if delta >= FUEL_EVENT_DELTA_PP:
+            conn.execute(
+                "INSERT INTO byd_fuel_events (ts, level_before, level_after, delta_pp)"
+                " VALUES (?,?,?,?)",
+                (int(snap["ts"]), prev, level, round(delta, 1)),
+            )
+            print(
+                f"BYD: ⛽ abastecimento detectado: {prev:.0f}% → {level:.0f}% "
+                f"(+{delta:.0f} p.p.)"
+            )
+        _meta_set(conn, "fuel_level", level)
+        conn.commit()
     finally:
         conn.close()
 
@@ -507,7 +554,7 @@ def history(hours: int = 24) -> list[dict]:
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         rows = conn.execute(
-            "SELECT ts, soc, range_ev, odo_km, charge_state, is_charging "
+            "SELECT ts, soc, range_ev, odo_km, charge_state, is_charging, oil_percent "
             "FROM byd_snapshots WHERE ts >= ? ORDER BY ts",
             (since,),
         ).fetchall()
@@ -517,7 +564,7 @@ def history(hours: int = 24) -> list[dict]:
     return [
         {
             "ts": r[0], "soc": r[1], "range_ev": r[2], "odo_km": r[3],
-            "charge_state": r[4], "is_charging": r[5],
+            "charge_state": r[4], "is_charging": r[5], "oil_percent": r[6],
         }
         for r in rows
     ]
@@ -623,6 +670,66 @@ def last_trip_after(epoch: float | None) -> bool:
     except sqlite3.OperationalError:
         return False
     return bool(row and row[0] and row[0] > epoch)
+
+
+def monthly_trips(months: int = 3) -> dict:
+    """Agregação mensal (BRT) das viagens: km, kWh EV estimado, contagem."""
+    months = max(1, min(int(months), 24))
+    since = time.time() - months * 31 * 86400
+    try:
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        rows = conn.execute(
+            "SELECT start_ts, end_ts, start_odo, end_odo, soc_start, soc_end "
+            "FROM byd_trips WHERE start_ts >= ? ORDER BY start_ts",
+            (since,),
+        ).fetchall()
+        conn.close()
+    except sqlite3.OperationalError:
+        return {}
+    battery_kwh = 12.9
+    out: dict = {}
+    for start_ts, end_ts, o1, o2, s1, s2 in rows:
+        month = _brt_day(start_ts)[:7]
+        d = out.setdefault(
+            month, {"km": 0.0, "kwh_ev": 0.0, "trips": 0, "seconds": 0}
+        )
+        d["km"] += (o2 or 0) - (o1 or 0)
+        d["trips"] += 1
+        if end_ts and start_ts:
+            d["seconds"] += max(0, int(end_ts - start_ts))
+        if s1 is not None and s2 is not None and s2 < s1:
+            d["kwh_ev"] += (s1 - s2) / 100.0 * battery_kwh
+    for d in out.values():
+        d["km"] = round(d["km"], 1)
+        d["kwh_ev"] = round(d["kwh_ev"], 2)
+        d["kwh_per_100km"] = (
+            round(d["kwh_ev"] / d["km"] * 100, 1) if d["km"] >= 2 else None
+        )
+        d["hours"] = round(d["seconds"] / 3600, 2)
+    return out
+
+
+def fuel_events(days: int = 90) -> list[dict]:
+    """Abastecimentos detectados (Δpp de tanque); litros calculados na exibição
+    com car_tank_l do config."""
+    since = time.time() - max(1, min(int(days), 365)) * 86400
+    try:
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        rows = conn.execute(
+            "SELECT ts, level_before, level_after, delta_pp "
+            "FROM byd_fuel_events WHERE ts >= ? ORDER BY ts DESC",
+            (since,),
+        ).fetchall()
+        conn.close()
+    except sqlite3.OperationalError:
+        return []
+    return [
+        {
+            "ts": r[0], "level_before": r[1], "level_after": r[2],
+            "delta_pp": r[3],
+        }
+        for r in rows
+    ]
 
 
 def energy_graph() -> dict | None:
@@ -773,11 +880,12 @@ async def _run_loop():
                         save_err = f"db: {e}"
                         if err_count == 1 or err_count % ERR_LOG_EVERY == 0:
                             print(f"BYD: erro de gravação ({err_count}x): {e}")
-                    # diário de bordo: viagens, casa e gráfico BYD 7 dias
+                    # diário de bordo: viagens, casa, gráfico BYD e combustível
                     try:
                         _update_trip(snap, pos, moving)
                         _maybe_learn_home()
                         await _maybe_poll_energy(client, vin)
+                        _update_fuel(snap, moving)
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
