@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] - 2026-10-18 (2)
+
+### Added
+- 🧭 **Diário de Bordo na aba Carro (Fase 2 do estudo)** — viagens derivadas localmente (a API BYD não tem conceito de viagem): máquina de estados no poller abre em movimento (`speed > 1,5 km/h`) e fecha após 2 ciclos parado; km vem do **Δodômetro** (confiável mesmo com buraco de GPS), com SOC início→fim, horários e geocerca (`depart_home`/`arrive_home`). Viagens < 0,2 km são ruído e descartadas. **Geocerca "casa" auto-aprendida**: célula modal de ~330 m das posições dos últimos 7 dias (o carro passa a maior parte parado em casa → a célula com mais pontos É a casa), atualizada semanalmente, raio 300 m — sem cadastro manual; até aprender (≈10 posições, ~1 dia parado) os flags ficam neutros. **Mapa Leaflet + OpenStreetMap** (CDN, mesmo modelo do Chart.js) com trajeto do dia, marcadores início/última posição e círculo da casa; navegação ◀ ▶ Hoje com modo "hoje ao vivo" (mesmo padrão do Hora a Hora, `shiftDayStr`/`todayLocalStr` reusados). **Consumo diário em três fontes**: km e kWh EV por dia derivados das viagens (kWh = ΔSOC × `car_battery_kwh`; kWh/100km próprio quando ≥2 km), kWh na tomada + R$ cruzados de `charge_sessions` (fallback R$ = kWh × tarifa para sessões antigas sem custo), e o **gráfico nativo BYD 7 dias** coletado 1×/dia (`_maybe_poll_energy`, guardado bruto em `byd_meta`/`energy_graph`). Gráfico de 14 dias: barras km + linha kWh/100km (eixo duplo). Novos endpoints: `/api/byd/positions?date=`, `/api/byd/trips?date=` (400 em formato inválido), `/api/byd/daily?days=` (máx. 90). Tabelas novas `byd_trips` e `byd_meta` (chave/valor para casa e gráfico BYD).
+- 🎓 **η pode re-aprender sozinha quando a partida é REAL (evolução da regra 10/10)** — a regra do dono era "η só re-aprende com partida confirmada PORQUE não havia âncora real de SOC". Agora há as duas: se o SOC inicial veio de leitura BYD fresca **E** houve viagem concluída desde o fim da última carga (`_departure_confirmed`, prova física de que o carro rodou), o `soc_confirmed` é marcado automaticamente com log claro ("🎓 Partida real confirmada pelo GPS"). Sem viagem entre cargas (top-up), a η continua congelada — comportamento conservador mantido. Nos dois pontos de início de sessão (auto-detecção e botão).
+- 🧹 **SOC modelo removido da aba Carro (pedido do dono)** — o comparativo "modelo × real" com alerta de divergência saiu da UI (o modelo não é real e o dono não quer vê-lo); o card mostra só o SOC real com a idade do dado, e o modelo continua trabalhando por dentro (âncora, previsões) — `model_soc` segue no `/api/byd/status` para debug.
+
+### Fixed
+- 🐛 **`UnboundLocalError` no `/api/byd/status`**: `home = home()` — a variável local sombra a função homônima antes da chamada; renomeado para `home_pos`. Só estourava no endpoint (poller ileso) e o boot test local não cobria esse caminho — agora TODOS os endpoints BYD são testados no boot local.
+
 ## [Unreleased] - 2026-10-18
 
 ### Added

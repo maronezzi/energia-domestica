@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>⚡ Energia Doméstica</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js"></script>
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
         :root{
@@ -676,7 +678,7 @@ carro —</div></div></div>
                 <div>
                     <div class="si-label" title="SOC real reportado pelo proprio carro (nuvem BYD)">SOC Real</div>
                     <div class="si-val"><span id="bydSoc">—</span> <span class="si-unit">%</span></div>
-                    <div class="si-sub" id="bydSocSub">modelo: —</div>
+                    <div class="si-sub" id="bydSocSub">—</div>
                 </div>
             </div>
             <div class="status-item">
@@ -728,7 +730,6 @@ carro —</div></div></div>
             </h2>
             <div id="bydErr" style="display:none;color:var(--warn);font-size:.85rem;margin:.4rem 0"></div>
             <div class="charge-summary" style="margin:.8rem 0 .3rem">
-                <div class="cs-card"><div class="cs-card-lbl">SOC modelo (estimado)</div><div class="cs-card-val" id="bydModelSoc">—</div></div>
                 <div class="cs-card"><div class="cs-card-lbl">Tempo até cheia</div><div class="cs-card-val" id="bydTTF">—</div></div>
                 <div class="cs-card"><div class="cs-card-lbl">Consumo EV (últ. 50 km)</div><div class="cs-card-val" id="bydCons">—</div></div>
                 <div class="cs-card"><div class="cs-card-lbl">Odômetro</div><div class="cs-card-val" id="bydOdo2">—</div></div>
@@ -737,7 +738,41 @@ carro —</div></div></div>
                 <canvas id="chartBydSoc"></canvas>
             </div>
             <div style="color:var(--dim);font-size:.8rem;margin-top:.4rem">
-                SOC das últimas 24 h (leitura real do carro) · viagens, trajeto no mapa e consumo diário chegam na fase 2 (diário de bordo)
+                SOC das últimas 24 h (leitura real do carro)
+            </div>
+        </div>
+
+        <div class="card" style="margin-top:1rem">
+            <h2>🧭 Diário de Bordo <span class="badge badge-blue" id="bydAtHome">—</span></h2>
+            <div style="display:flex;gap:.5rem;align-items:center;margin:.8rem 0 .5rem;flex-wrap:wrap">
+                <button class="soc-preset" onclick="bydShiftDay(-1)">◀</button>
+                <button class="soc-preset" id="bydDayLabel">—</button>
+                <button class="soc-preset" onclick="bydShiftDay(1)">▶</button>
+                <button class="soc-preset" onclick="bydGoToday()">Hoje</button>
+                <span style="margin-left:auto;color:var(--dim);font-size:.8rem" id="bydDayNote"></span>
+            </div>
+            <div class="charge-summary" style="margin:.5rem 0">
+                <div class="cs-card"><div class="cs-card-lbl">Km no dia</div><div class="cs-card-val" id="bydDayKm">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl">Viagens</div><div class="cs-card-val" id="bydDayTrips">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl">Dirigindo</div><div class="cs-card-val" id="bydDayHours">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl" title="Estimado pela queda real de SOC (ΔSOC × bateria)">kWh EV no dia</div><div class="cs-card-val" id="bydDayKwh">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl">kWh na tomada</div><div class="cs-card-val" id="bydDayHomeKwh">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl">Custo tomada</div><div class="cs-card-val" style="color:var(--ok)" id="bydDayCost">—</div></div>
+            </div>
+            <div id="bydMap" style="height:280px;border-radius:10px;border:1px solid rgba(255,255,255,.06)"></div>
+            <div class="table-wrap" style="margin-top:.8rem">
+                <table class="data-table">
+                    <thead><tr><th>Início</th><th>Duração</th><th>Km</th><th>SOC</th><th>Trajeto</th></tr></thead>
+                    <tbody id="bydTripsTbody">
+                        <tr><td colspan="5" style="text-align:center;color:var(--dim);padding:1.2rem">Sem viagens registradas ainda.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div style="height:200px;margin-top:1rem">
+                <canvas id="chartBydDaily"></canvas>
+            </div>
+            <div style="color:var(--dim);font-size:.8rem;margin-top:.4rem">
+                Últimos 14 dias: barras = km rodados · linha = kWh/100km EV estimado (ΔSOC × bateria). A "casa" é aprendida automaticamente das posições do carro; viagens com ≥ 0,2 km.
             </div>
         </div>
     </div>
@@ -1609,6 +1644,7 @@ async function loadByd() {
             fetch('/api/byd/history?hours=24').then(r => r.json())
         ]);
         renderByd(st, hist.points || []);
+        loadBydDiario();
     } catch (e) {
         document.getElementById('bydOff').style.display = 'block';
         document.getElementById('bydMain').style.display = 'none';
@@ -1629,17 +1665,18 @@ function renderByd(st, pts) {
     else err.style.display = 'none';
 
     const snap = st.snapshot || {};
-    // SOC real × modelo — divergência > 5pp vira alerta amarelo
+    // SOC real — a idade da leitura é o contexto (o SOC modelo não é exibido:
+    // não é real; divergências aparecem de direito na próxima carga, via âncora)
     document.getElementById('bydSoc').textContent = snap.soc != null ? Math.round(snap.soc) : '—';
-    const ms = st.model_soc, sub = document.getElementById('bydSocSub');
-    if (ms != null && snap.soc != null) {
-        const d = Math.abs(ms - snap.soc);
-        sub.textContent = 'modelo: ' + ms + '%' + (d > 5 ? '  ⚠️ diferença de ' + Math.round(d) + 'pp' : '  ✓ confere');
-        sub.style.color = d > 5 ? 'var(--warn)' : '';
-    } else {
-        sub.textContent = 'modelo: ' + (ms != null ? ms + '%' : '—');
-        sub.style.color = '';
-    }
+    document.getElementById('bydSocSub').textContent =
+        st.data_age_s != null ? 'dado de ' + fmtAge(st.data_age_s) + ' atrás' : '—';
+
+    // Geocerca: em casa / fora
+    window._bydHome = st.home || null;
+    const ah = document.getElementById('bydAtHome');
+    if (st.at_home === true) ah.textContent = '🏠 Em casa';
+    else if (st.at_home === false) ah.textContent = '🚗 Fora · ' + Math.round((st.home_dist_m || 0) / 100) / 10 + ' km de casa';
+    else ah.textContent = '—';
 
     // Carregamento
     document.getElementById('bydChargeState').textContent =
@@ -1675,7 +1712,6 @@ function renderByd(st, pts) {
         tp.length === 4 ? tp.map(v => v != null ? Math.round(v) : '—').join('/') + ' ' + tu : '—';
 
     // Resumo
-    document.getElementById('bydModelSoc').textContent = ms != null ? ms + '%' : '—';
     document.getElementById('bydTTF').textContent = snap.time_to_full_min != null ? fmtAge(snap.time_to_full_min * 60) : '—';
     document.getElementById('bydCons').textContent = snap.cons_ev_recent != null ? snap.cons_ev_recent.toFixed(1) + ' kWh/100km' : '—';
     document.getElementById('bydOdo').textContent = snap.odo_km != null ? Math.round(snap.odo_km).toLocaleString('pt-BR') + ' km' : '— km';
@@ -1688,9 +1724,135 @@ function renderByd(st, pts) {
     cBydSoc.update();
 }
 
+// ─── Diário de Bordo (fase 2) ────────────────────────────────
+let bydDay = null;        // null = hoje ao vivo (mesmo padrão do hourlyViewDate)
+let cBydDaily;
+let bydMap = null, bydMapLayer = null;
+
+function initBydDailyChart() {
+    cBydDaily = new Chart(document.getElementById('chartBydDaily'), {
+        type: 'bar',
+        data: {labels: [], datasets: [
+            {label: 'km', data: [], backgroundColor: 'rgba(59,130,246,.5)', borderColor: '#3b82f6', borderWidth: 1, borderRadius: 3, yAxisID: 'y'},
+            {label: 'kWh/100km', data: [], type: 'line', borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.1)', borderWidth: 2, pointRadius: 2, tension: .3, yAxisID: 'y2', spanGaps: true}
+        ]},
+        options: {responsive: true, maintainAspectRatio: false, animation: {duration: 200},
+            plugins: {legend: {labels: {color: '#64748b', font: {size: 11}}}},
+            scales: {
+                x: {ticks: {color: '#64748b', maxTicksLimit: 8}, grid: {color: 'rgba(255,255,255,.03)'}},
+                y: {beginAtZero: true, ticks: {color: '#3b82f6'}, grid: {color: 'rgba(255,255,255,.03)'}},
+                y2: {beginAtZero: true, position: 'right', ticks: {color: '#f59e0b'}, grid: {display: false}}
+            }}
+    });
+}
+
+function bydCurrentDay() { return bydDay || todayLocalStr(); }
+
+function bydShiftDay(delta) {
+    const next = shiftDayStr(bydCurrentDay(), delta);
+    bydDay = (next >= todayLocalStr()) ? null : next;  // hoje volta ao modo ao vivo
+    loadBydDiario();
+}
+
+function bydGoToday() { bydDay = null; loadBydDiario(); }
+
+async function loadBydDiario() {
+    const day = bydCurrentDay();
+    try {
+        const [posR, tripsR, dailyR] = await Promise.all([
+            fetch('/api/byd/positions?date=' + day).then(r => r.json()),
+            fetch('/api/byd/trips?date=' + day).then(r => r.json()),
+            fetch('/api/byd/daily?days=14').then(r => r.json())
+        ]);
+        renderBydDiario(day, posR.positions || [], tripsR.trips || [], dailyR);
+    } catch (e) { /* diário é best-effort; não derruba a aba */ }
+}
+
+function ensureBydMap() {
+    if (bydMap || typeof L === 'undefined') return;
+    bydMap = L.map('bydMap');
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© OpenStreetMap'}).addTo(bydMap);
+    bydMapLayer = L.layerGroup().addTo(bydMap);
+    bydMap.setView([-15.8, -47.9], 4);  // Brasil até a primeira posição chegar
+}
+
+function bydHomeDistKm(lat, lon) {
+    const h = window._bydHome;
+    if (!h) return null;
+    const R = 6371, rad = Math.PI / 180;
+    const a = Math.sin((h.lat - lat) * rad / 2) ** 2 +
+              Math.cos(lat * rad) * Math.cos(h.lat * rad) * Math.sin((h.lon - lon) * rad / 2) ** 2;
+    return R * 2 * Math.asin(Math.sqrt(a));
+}
+
+function renderBydDiario(day, positions, trips, daily) {
+    document.getElementById('bydDayLabel').textContent = fmtBR(day);
+    const isToday = day === todayLocalStr();
+    document.getElementById('bydDayNote').textContent = isToday ? 'hoje ao vivo' : '';
+
+    // stats do dia
+    const d = (daily.days || []).find(x => x.date === day) || {};
+    document.getElementById('bydDayKm').textContent = (d.km || 0).toLocaleString('pt-BR') + ' km';
+    document.getElementById('bydDayTrips').textContent = d.trips ?? 0;
+    document.getElementById('bydDayHours').textContent = (d.hours || 0) > 0 ? d.hours.toFixed(1) + ' h' : '—';
+    document.getElementById('bydDayKwh').textContent = (d.kwh_ev || 0) > 0 ? d.kwh_ev.toFixed(1) + ' kWh' : '—';
+    document.getElementById('bydDayHomeKwh').textContent = (d.kwh_home || 0) > 0 ? d.kwh_home.toFixed(2) + ' kWh' : '—';
+    document.getElementById('bydDayCost').textContent = (d.cost_home || 0) > 0 ? fmtR(d.cost_home) : '—';
+
+    // gráfico 14 dias
+    const days = daily.days || [];
+    cBydDaily.data.labels = days.map(x => x.date.slice(8) + '/' + x.date.slice(5, 7));
+    cBydDaily.data.datasets[0].data = days.map(x => x.km);
+    cBydDaily.data.datasets[1].data = days.map(x => x.kwh_per_100km);
+    cBydDaily.update();
+
+    // mapa
+    ensureBydMap();
+    setTimeout(() => bydMap.invalidateSize(), 60);  // container pode ter reaparecido
+    bydMapLayer.clearLayers();
+    const home = window._bydHome;
+    if (home) {
+        L.circle([home.lat, home.lon], {radius: home.radius_m, color: '#00d4aa', weight: 1, fillOpacity: .08}).addTo(bydMapLayer);
+    }
+    const pts = positions.filter(p => p.lat != null && p.lon != null).map(p => [p.lat, p.lon]);
+    if (pts.length) {
+        if (pts.length > 1) L.polyline(pts, {color: '#3b82f6', weight: 3, opacity: .8}).addTo(bydMapLayer);
+        L.circleMarker(pts[0], {radius: 6, color: '#00d4aa', fillColor: '#00d4aa', fillOpacity: 1}).bindPopup('Início do dia').addTo(bydMapLayer);
+        L.circleMarker(pts[pts.length - 1], {radius: 6, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 1}).bindPopup('Última posição').addTo(bydMapLayer);
+        bydMap.fitBounds(L.latLngBounds(pts).pad(0.35));
+        if (pts.length === 1) bydMap.setZoom(15);
+    } else if (home) {
+        bydMap.setView([home.lat, home.lon], 13);
+    }
+
+    // tabela de viagens
+    const tb = document.getElementById('bydTripsTbody');
+    if (!trips.length) {
+        tb.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--dim);padding:1.2rem">' +
+            (isToday ? 'Nenhuma viagem hoje (ainda).' : 'Nenhuma viagem neste dia.') + '</td></tr>';
+    } else {
+        tb.innerHTML = trips.map(t => {
+            const ini = new Date(t.start_ts * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
+            const fim = new Date(t.end_ts * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
+            const dur = Math.max(1, Math.round((t.end_ts - t.start_ts) / 60));
+            const soc = (t.soc_start != null && t.soc_end != null) ? Math.round(t.soc_start) + '% → ' + Math.round(t.soc_end) + '%' : '—';
+            let tag;
+            if (t.depart_home) tag = '🛫 saiu de casa';
+            else if (t.arrive_home) tag = '🏠 chegou em casa';
+            else if (t.start_lat != null && home) {
+                const dk = bydHomeDistKm(t.start_lat, t.start_lon);
+                tag = dk != null ? 'a ' + dk.toFixed(1) + ' km de casa' : '';
+            } else tag = '';
+            return '<tr><td>' + ini + ' → ' + fim + '</td><td>' + dur + ' min</td><td><b>' +
+                Number(t.km).toLocaleString('pt-BR') + ' km</b></td><td>' + soc + '</td><td>' + tag + '</td></tr>';
+        }).join('');
+    }
+}
+
 // Init
 initCharts();
 initBydChart();
+initBydDailyChart();
 fetchStatus();
 refreshChargeState();
 loadHourly();
@@ -1703,6 +1865,8 @@ setInterval(() => {
 setInterval(() => {
     if (document.getElementById('tab-byd')?.classList.contains('active')) loadByd();
 }, 30000);
+// Leaflet precisa recalcular tamanho quando o container aparece/redimensiona
+window.addEventListener('resize', () => { if (bydMap) bydMap.invalidateSize(); });
 // Faster polling for the charge session (every 2s) so the countdown is smooth
 setInterval(() => {
     if (lastCharge && (lastCharge.charging || lastCharge.state === 'completing')) {

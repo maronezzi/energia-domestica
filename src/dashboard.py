@@ -12,7 +12,7 @@ import threading
 import time
 import base64
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import os
 
@@ -2524,13 +2524,27 @@ def poll_loop():
                     start_energy_kwh=br.get("energy_kwh", 0),
                     cost_per_kwh=cfg_detect.get("kwh_cost", 0.956),
                 )
+                # η: soc_confirmed além do input do usuário quando o SOC inicial
+                # veio de leitura BYD REAL e houve viagem concluída desde a
+                # última carga (prova física de partida — regra 10/10 com âncora)
+                soc_confirmed = not soc_estimated
+                if (
+                    not soc_confirmed
+                    and byd_client.fresh_soc() is not None
+                    and _departure_confirmed()
+                ):
+                    soc_confirmed = True
+                    print(
+                        "🎓 Partida real confirmada pelo GPS (viagem desde a "
+                        "última carga) — η pode re-aprender neste ciclo"
+                    )
                 charging.start(
                     start_soc=soc_start,
                     target_soc=cfg_detect.get("car_target_soc", 80),
                     battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
                     start_energy_kwh=br.get("energy_kwh", 0),
                     session_uuid=session["session_uuid"],
-                    soc_confirmed=not soc_estimated,
+                    soc_confirmed=soc_confirmed,
                 )
                 # Sync config so recovery and UI reflect the auto-detected session
                 cfg_detect["car_charging"] = True
@@ -3133,6 +3147,107 @@ def api_byd_history(hours: int = 24):
     return {"points": byd_client.history(hours=hours)}
 
 
+def _brt_today() -> str:
+    """Data local (BRT, fixo -3) como 'YYYY-MM-DD' — a placa roda em UTC."""
+    return (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d")
+
+
+@app.get("/api/byd/positions")
+def api_byd_positions(date: str = None):
+    """Posições de um dia local (date='YYYY-MM-DD' BRT; default: hoje)."""
+    if date is None:
+        date = _brt_today()
+    else:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date deve ser YYYY-MM-DD")
+    return {"date": date, "positions": byd_client.positions_for_day(date)}
+
+
+@app.get("/api/byd/trips")
+def api_byd_trips(date: str = None):
+    """Viagens derivadas de um dia local (date='YYYY-MM-DD' BRT; default: hoje)."""
+    if date is None:
+        date = _brt_today()
+    else:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date deve ser YYYY-MM-DD")
+    return {"date": date, "trips": byd_client.trips_for_day(date)}
+
+
+@app.get("/api/byd/daily")
+def api_byd_daily(days: int = 14):
+    """Resumo diário: km, viagens, kWh EV estimados (ΔSOC), kWh/R$ da tomada
+    (charge_sessions) — últimos N dias locais (BRT)."""
+    days = max(1, min(days, 90))
+    byd = byd_client.daily_trips(days)
+    cost = load_config().get("kwh_cost", 0.956)
+    since = (datetime.utcnow() - timedelta(hours=3) - timedelta(days=days)).isoformat()
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT substr(start_time,1,10), SUM(energy_delivered_kwh), "
+            "SUM(total_cost) FROM charge_sessions "
+            "WHERE start_time >= ? AND status IN ('completed','auto_stopped') "
+            "GROUP BY substr(start_time,1,10)",
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+    home_kwh = {r[0]: (r[1] or 0.0, r[2] or 0.0) for r in rows}
+    out = []
+    for i in range(days - 1, -1, -1):
+        day = (datetime.utcnow() - timedelta(hours=3) - timedelta(days=i)).strftime(
+            "%Y-%m-%d"
+        )
+        t = byd.get(day, {})
+        hk, hcost = home_kwh.get(day, (0.0, 0.0))
+        out.append(
+            {
+                "date": day,
+                "km": t.get("km", 0.0),
+                "trips": t.get("trips", 0),
+                "kwh_ev": t.get("kwh_ev", 0.0),
+                "kwh_per_100km": t.get("kwh_per_100km"),
+                "hours": t.get("hours", 0.0),
+                "kwh_home": round(hk, 2),
+                # fallback do custo por sessões antigas sem total_cost
+                "cost_home": round(hcost if hcost else hk * cost, 2),
+            }
+        )
+    return {"days": out, "byd_graph": byd_client.energy_graph()}
+
+
+def _last_charge_end_epoch():
+    """Fim (epoch) da última sessão de carga concluída — None se nunca houve."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT MAX(end_time) FROM charge_sessions WHERE end_time IS NOT NULL "
+            "AND status IN ('completed','auto_stopped')"
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        # timestamps do DB são BRT (fixo -3); a placa roda em UTC
+        return datetime.fromisoformat(str(row[0])).replace(
+            tzinfo=timezone(timedelta(hours=-3))
+        ).timestamp()
+    except ValueError:
+        return None
+
+
+def _departure_confirmed() -> bool:
+    """O carro foi dirigido de verdade desde a última carga? Uma viagem BYD
+    concluída depois do fim da última sessão é prova física de partida."""
+    return byd_client.last_trip_after(_last_charge_end_epoch())
+
+
 @app.post("/api/car/soc")
 def api_car_soc(soc: int = 0):
     """Update current SOC (state of charge)."""
@@ -3213,13 +3328,24 @@ def api_car_start_charge():
             start_energy_kwh=start_energy,
             cost_per_kwh=cost_per_kwh,
         )
+        soc_confirmed = not _soc_estimated
+        if (
+            not soc_confirmed
+            and byd_client.fresh_soc() is not None
+            and _departure_confirmed()
+        ):
+            soc_confirmed = True
+            print(
+                "🎓 Partida real confirmada pelo GPS (viagem desde a última "
+                "carga) — η pode re-aprender neste ciclo"
+            )
         charging.start(
             start_soc=soc_start,
             target_soc=cfg.get("car_target_soc", 80),
             battery_kwh=cfg.get("car_battery_kwh", 12.9),
             start_energy_kwh=start_energy,
             session_uuid=session["session_uuid"],
-            soc_confirmed=not _soc_estimated,
+            soc_confirmed=soc_confirmed,
         )
         cfg["car_charging"] = True
         cfg["car_current_soc"] = soc_start
