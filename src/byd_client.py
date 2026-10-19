@@ -849,10 +849,24 @@ async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
     return snap, pos, moving
 
 
+def _dashboard_charging() -> bool:
+    """O dashboard está com sessão de carga ativa? O BYD às vezes demora
+    minutos para flipar is_charging após o plug (negociação do BMS) — nesse
+    intervalo o breaker JÁ está entregando energia e a cadência deve ser
+    rápida. Lê o tuya_config.json direto (mesmo esquema de _current_fuel_price)."""
+    try:
+        cfg = json.loads(
+            (BASE_DIR / "data" / "tuya_config.json").read_text(encoding="utf-8")
+        )
+        return bool(cfg.get("car_charging"))
+    except (OSError, ValueError):
+        return False
+
+
 def _next_interval(snap: dict, moving: bool) -> float:
     if moving:
         return POLL_MOVING
-    if snap.get("is_charging"):
+    if snap.get("is_charging") or _dashboard_charging():
         return POLL_CHARGING
     return POLL_IDLE + random.uniform(-POLL_JITTER, POLL_JITTER)
 
