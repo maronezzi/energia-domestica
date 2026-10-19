@@ -1,0 +1,13 @@
+{
+  "username": "seu-email@exemplo.com",
+  "password": "senha-do-app-my-byd",
+  "base_url": "https://dilinkappoversea-br.byd.auto",
+  "country_code": "BR",
+  "language": "pt",
+  "time_zone": "America/Sao_Paulo",
+  "control_pin": null,
+  "identifier_type": "0",
+  "mqtt_enabled": false,
+  "enabled": true,
+  "vin": null
+}

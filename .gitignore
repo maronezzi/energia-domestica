@@ -11,6 +11,9 @@ env/
 .pytest_cache/
 
 # ─── Project data (never commit user data or credentials) ───
+data/
+logs/
+!data/.gitkeep
 data/tuya_history.db
 data/tuya_config.json
 data/devices.json

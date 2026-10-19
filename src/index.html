@@ -295,6 +295,7 @@
     <button class="tab active" onclick="showTab('dashboard')">📊 Dashboard</button>
     <button class="tab" onclick="showTab('history')">📈 Histórico</button>
     <button class="tab" onclick="showTab('charges')">🔌 Carregamentos</button>
+    <button class="tab" onclick="showTab('byd')">🚗 Carro</button>
     <button class="tab" onclick="showTab('settings')">⚙️ Config</button>
 </div>
 
@@ -657,6 +658,91 @@ carro —</div></div></div>
     </div>
 </div>
 
+<!-- ═══ CARRO (BYD) ═══ -->
+<div id="tab-byd" class="tab-content">
+    <div class="card" id="bydOff" style="display:none">
+        <h2>🚗 Carro (BYD)</h2>
+        <p style="color:var(--dim);margin:.5rem 0;font-size:.9rem">
+            Coleta BYD desligada ou sem credenciais. Preencha
+            <code>data/byd.json</code> na placa (usuario/senha do app MY BYD —
+            guia completo em <code>docs/ESTUDO_ABA_BYD.md</code>) e reinicie o serviço.
+        </p>
+        <div id="bydOffErr" style="color:var(--warn);font-size:.85rem"></div>
+    </div>
+    <div id="bydMain" style="display:none">
+        <div class="status-bar">
+            <div class="status-item" style="min-width:170px">
+                <div class="si-icon" style="background:rgba(0,212,170,.15)">🔋</div>
+                <div>
+                    <div class="si-label" title="SOC real reportado pelo proprio carro (nuvem BYD)">SOC Real</div>
+                    <div class="si-val"><span id="bydSoc">—</span> <span class="si-unit">%</span></div>
+                    <div class="si-sub" id="bydSocSub">modelo: —</div>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="si-icon" style="background:rgba(59,130,246,.15)">⚡</div>
+                <div>
+                    <div class="si-label">Carregamento</div>
+                    <div class="si-val" style="font-size:1.1rem" id="bydChargeState">—</div>
+                    <div class="si-sub" id="bydChargeSub">tomada: —</div>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="si-icon" style="background:rgba(34,197,94,.15)">🛣️</div>
+                <div>
+                    <div class="si-label" title="Autonomia eletrica restante (hibrido: so a perna EV)">Autonomia EV</div>
+                    <div class="si-val"><span id="bydRangeEv">—</span> <span class="si-unit">km</span></div>
+                    <div class="si-sub" id="bydRangeSub">total — · comb. —</div>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="si-icon" style="background:rgba(245,158,11,.15)">📍</div>
+                <div>
+                    <div class="si-label">Posição</div>
+                    <div class="si-val" style="font-size:1.05rem" id="bydPos">—</div>
+                    <div class="si-sub" id="bydPosSub">—</div>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="si-icon" style="background:rgba(148,163,184,.15)">🚪</div>
+                <div>
+                    <div class="si-label">Segurança</div>
+                    <div class="si-val" style="font-size:1.05rem" id="bydLock">—</div>
+                    <div class="si-sub" id="bydLockSub">portas: —</div>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="si-icon" style="background:rgba(148,163,184,.15)">🌡️</div>
+                <div>
+                    <div class="si-label">Interna / Pneus</div>
+                    <div class="si-val" id="bydTemp">—</div>
+                    <div class="si-sub" id="bydTires">—</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" style="margin-top:1rem">
+            <h2>🚗 <span id="bydModel">BYD</span>
+                <span class="badge badge-blue" id="bydOdo">— km</span>
+                <span class="badge badge-blue" id="bydFresh">sem coleta</span>
+            </h2>
+            <div id="bydErr" style="display:none;color:var(--warn);font-size:.85rem;margin:.4rem 0"></div>
+            <div class="charge-summary" style="margin:.8rem 0 .3rem">
+                <div class="cs-card"><div class="cs-card-lbl">SOC modelo (estimado)</div><div class="cs-card-val" id="bydModelSoc">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl">Tempo até cheia</div><div class="cs-card-val" id="bydTTF">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl">Consumo EV (últ. 50 km)</div><div class="cs-card-val" id="bydCons">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl">Odômetro</div><div class="cs-card-val" id="bydOdo2">—</div></div>
+            </div>
+            <div style="height:220px;margin-top:.8rem">
+                <canvas id="chartBydSoc"></canvas>
+            </div>
+            <div style="color:var(--dim);font-size:.8rem;margin-top:.4rem">
+                SOC das últimas 24 h (leitura real do carro) · viagens, trajeto no mapa e consumo diário chegam na fase 2 (diário de bordo)
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- ═══ CONFIG ═══ -->
 <div id="tab-settings" class="tab-content">
     <div class="settings">
@@ -686,6 +772,7 @@ function showTab(n) {
     document.querySelector(`.tab[onclick*="${n}"]`).classList.add('active');
     document.getElementById('tab-' + n).classList.add('active');
     if (n === 'history') loadHistory();
+    if (n === 'byd') loadByd();
 }
 const MES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
 
@@ -1491,8 +1578,119 @@ async function saveKwh() {
     const a = document.getElementById('settingsOk'); a.style.display = 'block'; setTimeout(()=>a.style.display='none',3000);
 }
 
+// ─── Aba Carro (BYD) ─────────────────────────────────────────
+let cBydSoc;
+
+function initBydChart() {
+    cBydSoc = new Chart(document.getElementById('chartBydSoc'), {
+        type: 'line',
+        data: {labels: [], datasets: [{label: 'SOC %', data: [], borderColor: '#00d4aa', backgroundColor: 'rgba(0,212,170,.15)', fill: true, tension: .3, borderWidth: 2, pointRadius: 0, spanGaps: true}]},
+        options: {responsive: true, maintainAspectRatio: false, animation: {duration: 200},
+            plugins: {legend: {display: false}},
+            scales: {x: {ticks: {color: '#64748b', maxTicksLimit: 8}, grid: {color: 'rgba(255,255,255,.03)'}},
+                     y: {min: 0, max: 100, ticks: {color: '#64748b'}, grid: {color: 'rgba(255,255,255,.03)'}}}}
+    });
+}
+
+const BYD_CHARGE_TXT = {1: '⚡ Carregando', 15: 'Na tomada'};
+const BYD_TIRE_UNIT = {1: 'bar', 2: 'psi', 3: 'kPa'};
+
+function fmtAge(s) {
+    if (s == null) return '—';
+    if (s < 90) return Math.round(s) + 's';
+    if (s < 7200) return Math.round(s / 60) + ' min';
+    return (s / 3600).toFixed(1) + ' h';
+}
+
+async function loadByd() {
+    try {
+        const [st, hist] = await Promise.all([
+            fetch('/api/byd/status').then(r => r.json()),
+            fetch('/api/byd/history?hours=24').then(r => r.json())
+        ]);
+        renderByd(st, hist.points || []);
+    } catch (e) {
+        document.getElementById('bydOff').style.display = 'block';
+        document.getElementById('bydMain').style.display = 'none';
+    }
+}
+
+function renderByd(st, pts) {
+    const off = document.getElementById('bydOff'), main = document.getElementById('bydMain');
+    if (!st.configured) {
+        off.style.display = 'block'; main.style.display = 'none';
+        document.getElementById('bydOffErr').textContent = st.last_error ? '⚠️ Último erro: ' + st.last_error : '';
+        return;
+    }
+    off.style.display = 'none'; main.style.display = 'block';
+    document.getElementById('bydModel').textContent = st.model || 'BYD';
+    const err = document.getElementById('bydErr');
+    if (st.last_error) { err.style.display = 'block'; err.textContent = '⚠️ ' + st.last_error; }
+    else err.style.display = 'none';
+
+    const snap = st.snapshot || {};
+    // SOC real × modelo — divergência > 5pp vira alerta amarelo
+    document.getElementById('bydSoc').textContent = snap.soc != null ? Math.round(snap.soc) : '—';
+    const ms = st.model_soc, sub = document.getElementById('bydSocSub');
+    if (ms != null && snap.soc != null) {
+        const d = Math.abs(ms - snap.soc);
+        sub.textContent = 'modelo: ' + ms + '%' + (d > 5 ? '  ⚠️ diferença de ' + Math.round(d) + 'pp' : '  ✓ confere');
+        sub.style.color = d > 5 ? 'var(--warn)' : '';
+    } else {
+        sub.textContent = 'modelo: ' + (ms != null ? ms + '%' : '—');
+        sub.style.color = '';
+    }
+
+    // Carregamento
+    document.getElementById('bydChargeState').textContent =
+        snap.is_charging ? BYD_CHARGE_TXT[1] : (BYD_CHARGE_TXT[snap.charge_state] || (snap.is_connected ? 'Na tomada' : 'Desconectada'));
+    document.getElementById('bydChargeSub').textContent =
+        snap.time_to_full_min != null ? 'cheia em ' + fmtAge(snap.time_to_full_min * 60) : 'tomada: ' + (snap.is_connected ? 'sim' : 'não');
+
+    // Autonomia (híbrido: EV separada do combustível)
+    document.getElementById('bydRangeEv').textContent = snap.range_ev != null ? Math.round(snap.range_ev) : '—';
+    document.getElementById('bydRangeSub').textContent =
+        'total ' + (snap.range_total != null ? Math.round(snap.range_total) : '—') + ' km · comb. ' +
+        (snap.oil_percent != null ? Math.round(snap.oil_percent) + '%' : '—');
+
+    // Posição
+    const g = st.gps || {};
+    if (g.lat != null && g.lon != null) {
+        document.getElementById('bydPos').innerHTML =
+            '<a href="https://maps.google.com/?q=' + g.lat + ',' + g.lon + '" target="_blank" rel="noopener" style="color:var(--accent)">ver no mapa ↗</a>';
+        document.getElementById('bydPosSub').textContent = 'fix de ' + fmtAge(st.data_age_s) + ' atrás';
+    } else {
+        document.getElementById('bydPos').textContent = '—';
+        document.getElementById('bydPosSub').textContent = 'sem GPS ainda';
+    }
+
+    // Segurança / conforto
+    document.getElementById('bydLock').textContent = snap.locked == null ? '—' : (snap.locked ? '🔒 Travado' : '🔓 Destrancado');
+    document.getElementById('bydLockSub').textContent =
+        'portas ' + (snap.doors_open ? 'ABERTAS ⚠️' : 'ok') + ' · janelas ' + (snap.windows_open ? 'abertas' : 'ok');
+    document.getElementById('bydTemp').textContent = snap.temp_in_car != null ? Math.round(snap.temp_in_car) + ' °C' : '—';
+    const tp = snap.tires || [];
+    const tu = BYD_TIRE_UNIT[snap.tire_unit] || snap.tire_unit || 'psi';
+    document.getElementById('bydTires').textContent =
+        tp.length === 4 ? tp.map(v => v != null ? Math.round(v) : '—').join('/') + ' ' + tu : '—';
+
+    // Resumo
+    document.getElementById('bydModelSoc').textContent = ms != null ? ms + '%' : '—';
+    document.getElementById('bydTTF').textContent = snap.time_to_full_min != null ? fmtAge(snap.time_to_full_min * 60) : '—';
+    document.getElementById('bydCons').textContent = snap.cons_ev_recent != null ? snap.cons_ev_recent.toFixed(1) + ' kWh/100km' : '—';
+    document.getElementById('bydOdo').textContent = snap.odo_km != null ? Math.round(snap.odo_km).toLocaleString('pt-BR') + ' km' : '— km';
+    document.getElementById('bydOdo2').textContent = snap.odo_km != null ? Math.round(snap.odo_km).toLocaleString('pt-BR') + ' km' : '—';
+    document.getElementById('bydFresh').textContent = st.last_ok_ts ? 'coleta há ' + fmtAge(st.poll_age_s) : 'sem coleta';
+
+    // Gráfico SOC 24h
+    cBydSoc.data.labels = pts.map(p => new Date(p.ts * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'}));
+    cBydSoc.data.datasets[0].data = pts.map(p => p.soc);
+    cBydSoc.update();
+}
+
 // Init
 initCharts();
+initBydChart();
 fetchStatus();
 refreshChargeState();
 loadHourly();
@@ -1501,6 +1699,9 @@ setInterval(refreshChargeState, 5000);
 setInterval(loadHourly, 120000);
 setInterval(() => {
     if (document.getElementById('tab-charges')?.classList.contains('active')) loadCharges();
+}, 30000);
+setInterval(() => {
+    if (document.getElementById('tab-byd')?.classList.contains('active')) loadByd();
 }, 30000);
 // Faster polling for the charge session (every 2s) so the countdown is smooth
 setInterval(() => {

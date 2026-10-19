@@ -21,6 +21,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 import uvicorn
 
+import byd_client  # poller BYD (thread própria; docs/ESTUDO_ABA_BYD.md)
+
 # ─── Config ────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent  # Project root (one level above src/)
 DB_FILE = BASE_DIR / "data" / "tuya_history.db"
@@ -1051,6 +1053,13 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
             _cfg_end = load_config()
             _cfg_end["car_current_soc"] = int(soc_end)  # inteiro: piso (conservador)
             _cfg_end["car_current_soc_ts"] = end_dt.isoformat()
+            # Âncora BYD: se o carro reportou SOC recentemente, o valor real
+            # substitui o soc_end projetado (fim de carga = transição de âncora).
+            _byd_soc = byd_client.fresh_soc()
+            if _byd_soc is not None:
+                _cfg_end["car_current_soc"] = int(_byd_soc)
+                _cfg_end["car_current_soc_ts"] = datetime.now().isoformat()
+                print(f"🔋 SOC atual semeado do BYD no fim da sessão: {_byd_soc:.0f}%")
             if eff_aprendida is not None:
                 _cfg_end["car_charge_efficiency"] = eff_aprendida
             save_config(_cfg_end)
@@ -1348,6 +1357,11 @@ def estimate_car_soc_start(cfg):
     def _clamp(v):
         return max(0.0, min(100.0, float(v)))
 
+    # Âncora BYD: SOC REAL recente (leitura direta do carro) vence qualquer
+    # heurística, mas perde para input explícito do usuário (checado acima).
+    # estimated=True de propósito: a η continua aprendendo só com partida
+    # confirmada pelo dono (regra 10/10) — o SOC real apenas semeia o modelo.
+    byd_soc = byd_client.fresh_soc()
     if row:
         soc_end, soc_start, end_time, end_reason = row
         if cfg_soc is not None and cfg_ts:
@@ -1358,10 +1372,16 @@ def estimate_car_soc_start(cfg):
                     return _clamp(cfg_soc), False
             except ValueError:
                 pass  # timestamp corrompido — trata como não informado
+        if byd_soc is not None:
+            # sem print: esta função roda a cada /api/charge/state (5s) —
+            # log aqui inundaria o service.log (lição do b773e33)
+            return int(_clamp(byd_soc)), True
         # Sessão completa (carro encheu sozinho): usa o SOC inicial reconciliado
         if end_reason == "auto" and soc_end >= 99 and soc_start is not None:
             return int(_clamp(soc_start)), True
         return int(_clamp(soc_end)), True
+    if byd_soc is not None:
+        return int(_clamp(byd_soc)), True
     if cfg_soc is not None:
         return int(_clamp(cfg_soc)), False
     return 50.0, True
@@ -3098,6 +3118,21 @@ def api_breaker_off():
 
 
 # ─── Car charging endpoints ─────────────────────────────────────
+@app.get("/api/byd/status")
+def api_byd_status():
+    """Última telemetria BYD em cache (nunca chama a nuvem em tempo real)."""
+    cfg = load_config()
+    st = byd_client.status()
+    st["model_soc"] = cfg.get("car_current_soc")
+    return st
+
+
+@app.get("/api/byd/history")
+def api_byd_history(hours: int = 24):
+    """Série de snapshots BYD para gráficos (cache local do SQLite)."""
+    return {"points": byd_client.history(hours=hours)}
+
+
 @app.post("/api/car/soc")
 def api_car_soc(soc: int = 0):
     """Update current SOC (state of charge)."""
@@ -3531,6 +3566,7 @@ if __name__ == "__main__":
         )
 
     threading.Thread(target=poll_loop, daemon=True).start()
+    byd_client.start()
     # Bind address:
     #   ENERGIA_HOST=127.0.0.1 (default, safer — only loopback)
     #   ENERGIA_HOST=0.0.0.0   (expose to LAN; required to access from other devices)

@@ -2,3 +2,8 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 tinytuya>=1.13
 pydantic>=2.5
+# BYD (docs/ESTUDO_ABA_BYD.md) - versao pinada: lib alpha de API nao-oficial.
+# Na placa armv7, aiohttp/cryptography vem do apk (py3-aiohttp, py3-cryptography)
+# e pybyd entra com --no-deps; ver §5 do estudo.
+pybyd==0.0.79
+paho-mqtt>=2.1,<3
