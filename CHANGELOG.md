@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-19 (2)
+
+### Added
+- 💵 **Custo estimado por VIAGEM na tabela do Diário de Bordo** — duas colunas novas: **Custo EV** = kWh da queda real de SOC ÷ η (`car_charge_efficiency`) × tarifa (o que custa repor aquela energia na tomada, não a energia bruta da bateria) e **Custo combustível** = km × L/100km médio dos dias rodados (gráfico nativo BYD 7d) × último preço congelado num abastecimento (fallback: `car_fuel_price`). No `/api/byd/trips` cada viagem ganha `kwh_ev`, `cost_ev`, `liters_fuel` e `cost_fuel`. Validado na placa com viagem de teste (inserida, conferida no navegador, removida) — e de quebra a primeira viagem REAL do dono apareceu sozinha (17 km, 58→39%, R$ 2,40 EV, trajeto desenhado no mapa, "a 0,4 km de casa": a casa já tinha sido aprendida com as posições da noite).
+
 ## [Unreleased] - 2026-10-19
 
 ### Changed

@@ -3171,7 +3171,10 @@ def api_byd_positions(date: str = None):
 
 @app.get("/api/byd/trips")
 def api_byd_trips(date: str = None):
-    """Viagens derivadas de um dia local (date='YYYY-MM-DD' BRT; default: hoje)."""
+    """Viagens derivadas de um dia local (date='YYYY-MM-DD' BRT; default: hoje)
+    com custo estimado por viagem: energia (ΔSOC ÷ η × tarifa — o que custa
+    repor na tomada) e combustível (km × L/100km médio BYD × último preço
+    congelado), quando há preço e consumo conhecidos."""
     if date is None:
         date = _brt_today()
     else:
@@ -3179,7 +3182,39 @@ def api_byd_trips(date: str = None):
             datetime.strptime(date, "%Y-%m-%d")
         except ValueError:
             raise HTTPException(status_code=400, detail="date deve ser YYYY-MM-DD")
-    return {"date": date, "trips": byd_client.trips_for_day(date)}
+    trips = byd_client.trips_for_day(date)
+    cfg = load_config()
+    kwh_cost = cfg.get("kwh_cost", 0.956)
+    battery = float(cfg.get("car_battery_kwh") or 12.9)
+    eta = float(cfg.get("car_charge_efficiency") or 0.9)
+    fuel_price_default = cfg.get("car_fuel_price")
+    evs = byd_client.fuel_events(days=120)
+    last_fuel_price = (
+        evs[0].get("price") if evs and evs[0].get("price") else fuel_price_default
+    )
+    cons_l_per_100 = None
+    sg = ((byd_client.energy_graph() or {}).get("self_graph") or {})
+    if "L/100km" in str(sg.get("energy_consumption_unit") or ""):
+        vals = [v for v in (sg.get("energy_consumption") or []) if v and v > 0]
+        if vals:
+            cons_l_per_100 = sum(vals) / len(vals)
+    for t in trips:
+        s1, s2 = t.get("soc_start"), t.get("soc_end")
+        kwh_bat = (
+            (s1 - s2) / 100.0 * battery
+            if (s1 is not None and s2 is not None and s2 < s1)
+            else 0.0
+        )
+        t["kwh_ev"] = round(kwh_bat, 2)
+        t["cost_ev"] = round(kwh_bat / eta * kwh_cost, 2) if kwh_bat > 0 else 0.0
+        liters = t["km"] * cons_l_per_100 / 100.0 if cons_l_per_100 else None
+        t["liters_fuel"] = round(liters, 2) if liters is not None else None
+        t["cost_fuel"] = (
+            round(liters * last_fuel_price, 2)
+            if (liters is not None and last_fuel_price)
+            else None
+        )
+    return {"date": date, "trips": trips}
 
 
 @app.get("/api/byd/fuel")
