@@ -480,6 +480,32 @@ def _current_fuel_price():
         return None
 
 
+# último ponto de GPS VÁLIDO (para descartar saltos impossíveis); a thread
+# do poller é a única que mexe, sem lock
+_last_good_pos: dict | None = None
+
+
+def _gps_plausible(pos: dict) -> bool:
+    """Filtra lixo de GPS da T-Box: (0,0) — a 'Ilha Nula' que a BYD manda
+    quando o fix não existe (viu-se em 19/10 21:08 e esticou o mapa até o
+    Atlântico) — e saltos impossíveis (mais rápido que ~250 km/h do último
+    ponto válido). Ponto ruim NÃO é gravado nem vira referência."""
+    global _last_good_pos
+    lat, lon = pos.get("lat"), pos.get("lon")
+    if lat is None or lon is None:
+        return False
+    if abs(lat) < 0.05 and abs(lon) < 0.05:  # (0,0) e vizinhança = sem fix
+        return False
+    if _last_good_pos is not None:
+        dt = pos["ts"] - _last_good_pos["ts"]
+        if dt > 0:
+            max_m = 250_000 / 3600 * dt + 5_000  # 250 km/h + 5 km de folga
+            if haversine_m(lat, lon, _last_good_pos["lat"], _last_good_pos["lon"]) > max_m:
+                return False
+    _last_good_pos = {"ts": pos["ts"], "lat": lat, "lon": lon}
+    return True
+
+
 def _update_fuel(snap: dict, moving: bool):
     """Detecta abastecimento: salto de ≥ FUEL_EVENT_DELTA_PP no nível do
     tanque (oil_percent) entre leituras com o carro parado. A baseline
@@ -846,6 +872,9 @@ async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
             "heading": _f(getattr(gps, "direction", None)),
             "odo_km": snap["odo_km"],
         }
+        if not _gps_plausible(pos):
+            print("BYD: posição de GPS descartada (fix inválido ou salto impossível)")
+            pos = None
     return snap, pos, moving
 
 

@@ -1005,6 +1005,13 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
         start_time_str, start_energy, cost_per_kwh, battery_kwh, soc_start = row
         start_dt = datetime.fromisoformat(start_time_str)
         end_dt = datetime.now()
+        # Proveniência do SOC de partida (flag gravado no config NO INÍCIO da
+        # sessão): True = veio de âncora REAL (leitura BYD fresca ou input do
+        # dono). Nesse caso a reconciliação de trás-pra-frente NÃO o substitui:
+        # a fórmula assume η/bateria corretos, e a leitura real vale mais que a
+        # premissa (em 19/10 a âncora BYD 26% real foi sobrescrita p/ 17,92%).
+        # Persistido no config para sobreviver a restarts no meio da carga.
+        _soc_start_real = load_config().get("car_soc_start_real", False)
         # Duration = time the car was actually charging (exclude idle tail)
         eff_end = effective_end_time or end_dt
         duration = int(max(0, (eff_end - start_dt).total_seconds()))
@@ -1071,15 +1078,21 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
             and energy_delivered >= 0.5
             and battery_kwh
         ):
-            soc_start_real = max(
-                0.0, soc_end - (energy_delivered * eff / max(0.1, battery_kwh)) * 100
-            )
-            if soc_start is None or abs(soc_start - soc_start_real) > 0.05:
+            if _soc_start_real:
                 print(
-                    f"🔁 SOC inicial reconciliado: {soc_start and round(soc_start, 1)}% "
-                    f"→ {soc_start_real:.1f}% ({energy_delivered:.2f} kWh até o carro parar)"
+                    f"🔌 SOC inicial da partida mantido em {soc_start} — âncora "
+                    f"real (BYD/input); reconciliação não o substitui"
                 )
-            soc_start = round(soc_start_real, 2)
+            else:
+                soc_start_real = max(
+                    0.0, soc_end - (energy_delivered * eff / max(0.1, battery_kwh)) * 100
+                )
+                if soc_start is None or abs(soc_start - soc_start_real) > 0.05:
+                    print(
+                        f"🔁 SOC inicial reconciliado: {soc_start and round(soc_start, 1)}% "
+                        f"→ {soc_start_real:.1f}% ({energy_delivered:.2f} kWh até o carro parar)"
+                    )
+                soc_start = round(soc_start_real, 2)
         # O campo "SOC Atual do Carro" reflete onde o carro ESTÁ: fim de carga
         # real → soc_end (100% quando o carro para sozinho). A estimativa de
         # partida da próxima carga NÃO vem daqui — estimate_car_soc_start usa o
@@ -1151,6 +1164,13 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
                     "end_reason": end_reason,
                 }
             )
+
+        # Limpa os flags de proveniência do SOC — valem só durante a sessão
+        _cfg_flags = load_config()
+        if _cfg_flags.get("car_soc_confirmed") or _cfg_flags.get("car_soc_start_real"):
+            _cfg_flags["car_soc_confirmed"] = False
+            _cfg_flags["car_soc_start_real"] = False
+            save_config(_cfg_flags)
 
         return {
             "session_uuid": session_uuid,
@@ -2589,6 +2609,13 @@ def poll_loop():
                 cfg_detect["car_charge_start_kwh"] = br.get("energy_kwh", 0)
                 cfg_detect["car_charge_start_time"] = datetime.now().isoformat()
                 cfg_detect["car_charge_start_soc"] = soc_start
+                # Proveniência do SOC inicial, persistida: sobrevive a restarts
+                # do serviço no meio da carga (ontem um deploy apagou o 🎓 do
+                # GPS e a η perdeu a chance de aprender)
+                cfg_detect["car_soc_confirmed"] = soc_confirmed
+                cfg_detect["car_soc_start_real"] = (
+                    not soc_estimated or byd_client.fresh_soc() is not None
+                )
                 save_config(cfg_detect)
                 print("⚡ Auto-detected charging: breaker ON with power, starting session")
 
@@ -3531,6 +3558,10 @@ def api_car_start_charge():
         cfg["car_charge_start_kwh"] = br.get("energy_kwh", 0)
         cfg["car_charge_start_time"] = datetime.now().isoformat()
         cfg["car_charge_start_soc"] = soc_start
+        cfg["car_soc_confirmed"] = soc_confirmed
+        cfg["car_soc_start_real"] = (
+            not _soc_estimated or byd_client.fresh_soc() is not None
+        )
         save_config(cfg)
         return {
             "success": True,
@@ -3564,6 +3595,7 @@ def api_car_stop_charge():
                 soc_end=charging.effective_soc,
                 end_reason="manual",
                 effective_end_time=charging.effective_end_time,
+                soc_start_confirmed=charging.soc_confirmed,
             )
 
         charging.stop(reason="manual")
@@ -3838,6 +3870,9 @@ if __name__ == "__main__":
             battery_kwh=_bat,
             start_energy_kwh=_start_e,
             session_uuid=_uuid,
+            # Flags persistidos no início da sessão: um deploy/restart no meio
+            # da carga não pode apagar o 🎓 (confirmação de partida p/ η)
+            soc_confirmed=_cfg.get("car_soc_confirmed", False),
         )
         charging.start_time = datetime.fromisoformat(_start_ts)
         elapsed_min = (datetime.now() - charging.start_time).total_seconds() / 60
@@ -3865,6 +3900,7 @@ if __name__ == "__main__":
             target_soc=_cfg.get("car_target_soc", 80),
             battery_kwh=_cfg.get("car_battery_kwh", 12.9),
             start_energy_kwh=_start_kwh if _start_kwh else 0,
+            soc_confirmed=_cfg.get("car_soc_confirmed", False),
         )
         if _cfg.get("car_charge_start_time"):
             charging.start_time = datetime.fromisoformat(_cfg["car_charge_start_time"])

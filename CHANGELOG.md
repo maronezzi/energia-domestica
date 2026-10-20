@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] - 2026-10-20
+
+### Fixed
+- 🌊 **GPS do carro no meio do Atlântico** — em 19/10 21:08 a T-Box mandou fix (0,0) — a "Ilha Nula", placeholder de GPS sem sinal — e o coletor só filtrava `None`: o ponto entrou no banco e o `fitBounds` do Leaflet esticou o mapa até o Atlântico. Agora `_gps_plausible()` rejeita (0,0) e arredondeza **e** saltos impossíveis (>250 km/h do último ponto válido); ponto ruim não é gravado nem vira referência. O ponto ruim foi apagado do banco (118 posições íntegras restantes).
+- 🎓 **Restart no meio da carga apagava a confirmação de partida (η deixava de aprender)** — os 4 deploys de 19/10 à noite reinaram o serviço durante a carga; a recuperação de sessão restaurava o SOC mas não o `soc_confirmed`, e o 🎓 do GPS (impresso às 18:28) morreu no primeiro restart: a carga fechou confiante com "η mantida em 0.94". Agora os flags `car_soc_confirmed` e `car_soc_start_real` são gravados no config NO INÍCIO da sessão (auto-detecção e botão), restaurados pelas DUAS recuperações (DB e config-only), passados também no stop manual (`soc_start_confirmed`) e limpos no finalize.
+- 🔁 **Reconciliação de fim de sessão sobrescrevia a âncora REAL da BYD** — a fórmula "partida = 100 − energia ÷ η" reescreveu o soc_start de 26% (leitura real no plug) para 17,92% na sessão de ontem: a fórmula assume η/bateria corretos, mas a leitura real na tomada vale mais que a premissa. Quando `car_soc_start_real`, a reconciliação é pulada com log ("SOC inicial da partida mantido em 26% — âncora real"). O `soc_start_confirmed` do stop manual também passou a ser enviado.
+- 🔍 Investigação do "zerou a carga por um instante" reportado pelo dono: **0 dips** no breaker (switch=1 com potência 0) na janela da carga — a energia nunca caiu de verdade (contador contínuo, sessão íntegra: 11,3 kWh, 26→100, auto-stop confiante). O que piscou foi o dashboard durante os restarts de deploy (~15s cada). Nenhuma mudança necessária; ficam as provas nos logs/DB.
+
 ## [Unreleased] - 2026-10-19 (6)
 
 ### Fixed
