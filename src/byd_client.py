@@ -369,6 +369,8 @@ def _maybe_learn_home():
 _trip: dict | None = None
 _trip_still = 0
 _last_still_odo = None  # último odo lido com o carro parado (âncora de abertura)
+_last_still_ts = None   # e o ts/soc desse ciclo (para reconstruir viagem invisível)
+_last_still_soc = None
 
 
 def _trip_distance_home(point, conn):
@@ -380,26 +382,87 @@ def _trip_distance_home(point, conn):
     return haversine_m(point["lat"], point["lon"], float(lat), float(lon))
 
 
+def _insert_trip(conn, trip: dict, note: str = "viagem"):
+    """Grava uma viagem fechada (real ou reconstruída) em byd_trips."""
+    km = (trip.get("end_odo") or 0) - (trip.get("start_odo") or 0)
+    r = _home_radius(conn)
+    d_start = _trip_distance_home(trip.get("start_point"), conn)
+    d_end = _trip_distance_home(trip.get("end_point"), conn)
+    depart = None if d_start is None else int(d_start <= r)
+    arrive = None if d_end is None else int(d_end <= r)
+    conn.execute(
+        """INSERT INTO byd_trips
+           (start_ts, end_ts, start_odo, end_odo,
+            start_lat, start_lon, end_lat, end_lon,
+            soc_start, soc_end, depart_home, arrive_home)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            int(trip["start_ts"]), int(trip["end_ts"]),
+            trip["start_odo"], trip["end_odo"],
+            (trip.get("start_point") or {}).get("lat"),
+            (trip.get("start_point") or {}).get("lon"),
+            (trip.get("end_point") or {}).get("lat"),
+            (trip.get("end_point") or {}).get("lon"),
+            trip.get("soc_start"), trip.get("soc_end"), depart, arrive,
+        ),
+    )
+    _meta_set(conn, "last_trip_end_ts", int(trip["end_ts"]))
+    print(
+        f"BYD: {note} {km:.1f} km "
+        f"({trip.get('soc_start') and round(trip['soc_start'])}% → "
+        f"{trip.get('soc_end') and round(trip['soc_end'])}%) "
+        f"{'· saiu de casa' if depart else ''}{'· chegou em casa' if arrive else ''}"
+    )
+
+
 def _update_trip(snap: dict, pos: dict | None, moving: bool):
     """Máquina de viagens: abre em movimento, fecha após 2 ciclos parado.
     km vem do Δodômetro (confiável); GPS só contextualiza início/fim.
     O início é ancorado no ÚLTIMO odo lido PARADO: o trecho dirigido antes
     de o speed chegar defasado pela BYD não se perde (a soma das viagens
-    passa a fechar com o Δodômetro do dia — antes 31 km viravam 28)."""
-    global _trip, _trip_still, _last_still_odo
+    passa a fechar com o Δodômetro do dia — antes 31 km viravam 28).
+    E se o odômetro AVANÇAR entre dois ciclos parados (nenhum poll pegou o
+    carro em movimento — os 3 percursos de 24/10), a viagem é RECONSTRUÍDA
+    dos dois extremos: km exatos, horário aproximado, sem trajeto."""
+    global _trip, _trip_still, _last_still_odo, _last_still_ts, _last_still_soc
     odo = snap.get("odo_km")
     if odo is None or odo <= 0:
         return  # odo_km = 0 é sentinela da BYD, não é leitura
     if not moving:
+        # reconstrução: dirigiu entre dois ciclos parados sem nenhum poll
+        # pegando speed > 1,5 (viagem "invisível" para a máquina de estados)
+        if (
+            _trip is None
+            and _last_still_odo
+            and odo - _last_still_odo >= TRIP_MIN_KM
+        ):
+            conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+            try:
+                _insert_trip(
+                    conn,
+                    {
+                        "start_ts": _last_still_ts or snap["ts"],
+                        "end_ts": snap["ts"],
+                        "start_odo": _last_still_odo, "end_odo": odo,
+                        "soc_start": _last_still_soc, "soc_end": snap.get("soc"),
+                        "start_point": None, "end_point": None,
+                    },
+                    note="viagem reconstruída (odo entre polls)",
+                )
+                conn.commit()
+            finally:
+                conn.close()
         _last_still_odo = odo
+        _last_still_ts = snap["ts"]
+        _last_still_soc = snap.get("soc")
     if moving:
         _trip_still = 0
         point = {"lat": pos["lat"], "lon": pos["lon"]} if pos else None
         if _trip is None:
             _trip = {
-                "start_ts": snap["ts"],
+                "start_ts": _last_still_ts or snap["ts"],
                 "start_odo": _last_still_odo if _last_still_odo else odo,
-                "soc_start": snap.get("soc"),
+                "soc_start": _last_still_soc or snap.get("soc"),
                 "start_point": point, "end_point": point,
                 "end_ts": snap["ts"], "end_odo": odo,
                 "soc_end": snap.get("soc"),
@@ -422,35 +485,8 @@ def _update_trip(snap: dict, pos: dict | None, moving: bool):
         return
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     try:
-        r = _home_radius(conn)
-        d_start = _trip_distance_home(trip["start_point"], conn)
-        d_end = _trip_distance_home(trip["end_point"], conn)
-        depart = None if d_start is None else int(d_start <= r)
-        arrive = None if d_end is None else int(d_end <= r)
-        conn.execute(
-            """INSERT INTO byd_trips
-               (start_ts, end_ts, start_odo, end_odo,
-                start_lat, start_lon, end_lat, end_lon,
-                soc_start, soc_end, depart_home, arrive_home)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                int(trip["start_ts"]), int(trip["end_ts"]),
-                trip["start_odo"], trip["end_odo"],
-                (trip["start_point"] or {}).get("lat"),
-                (trip["start_point"] or {}).get("lon"),
-                (trip["end_point"] or {}).get("lat"),
-                (trip["end_point"] or {}).get("lon"),
-                trip["soc_start"], trip["soc_end"], depart, arrive,
-            ),
-        )
-        _meta_set(conn, "last_trip_end_ts", int(trip["end_ts"]))
+        _insert_trip(conn, trip)
         conn.commit()
-        print(
-            f"BYD: viagem {km:.1f} km "
-            f"({trip['soc_start'] and round(trip['soc_start'])}% → "
-            f"{trip['soc_end'] and round(trip['soc_end'])}%) "
-            f"{'· saiu de casa' if depart else ''}{'· chegou em casa' if arrive else ''}"
-        )
     finally:
         conn.close()
 
@@ -901,7 +937,9 @@ async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
         "range_total": _f(getattr(rt, "endurance_mileage", None)),
         "range_ev": _f(getattr(rt, "ev_endurance", None)),
         "range_oil": _f(getattr(rt, "oil_endurance", None)),
-        "oil_percent": _f(getattr(rt, "oil_percent", None)),
+        "oil_percent": None if _f(getattr(rt, "oil_percent", None)) == 0 else _f(
+            getattr(rt, "oil_percent", None)
+        ),  # 0 é sentinela da BYD (carro com 489 km de autonomia não está no 0%)
         # odo_km = 0 é sentinela da BYD (viu-se em 19/10 e 22/10), não leitura
         "odo_km": None if not _f(getattr(rt, "total_mileage", None)) else _f(
             getattr(rt, "total_mileage", None)
@@ -1079,6 +1117,47 @@ def _thread_main():
         print(f"BYD: poller parou: {type(e).__name__}: {e}")
 
 
+def _backfill_trips_from_snapshots():
+    """Reconstrói viagens perdidas do histórico de snapshots (gate
+    byd_meta/trips_backfill_v1, roda 1x): para cada par consecutivo de
+    leituras com odômetro avançando ≥ TRIP_MIN_KM, se NENHUMA viagem
+    registrada intersecta o intervalo, cria a viagem reconstruída (km/SOC
+    exatos dos extremos; horários aproximados; sem trajeto)."""
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    try:
+        if _meta_get(conn, "trips_backfill_v1"):
+            return
+        rows = conn.execute(
+            "SELECT ts, odo_km, soc FROM byd_snapshots "
+            "WHERE odo_km IS NOT NULL AND odo_km > 0 ORDER BY ts"
+        ).fetchall()
+        existing = conn.execute(
+            "SELECT start_ts, end_ts FROM byd_trips"
+        ).fetchall()
+        gaps = []
+        prev = None
+        for ts, odo, soc in rows:
+            if prev is not None and odo - prev[1] >= TRIP_MIN_KM:
+                t1, o1, s1 = prev
+                if not any(s <= ts and e >= t1 for s, e in existing):
+                    gaps.append((t1, ts, o1, odo, s1, soc))
+            prev = (ts, odo, soc)
+        for t1, t2, o1, o2, s1, s2 in gaps:
+            conn.execute(
+                """INSERT INTO byd_trips
+                   (start_ts, end_ts, start_odo, end_odo,
+                    soc_start, soc_end, depart_home, arrive_home)
+                   VALUES (?,?,?,?,?,?,NULL,NULL)""",
+                (int(t1), int(t2), o1, o2, s1, s2),
+            )
+        _meta_set(conn, "trips_backfill_v1", "1")
+        conn.commit()
+        if gaps:
+            print(f"BYD: backfill reconstruiu {len(gaps)} viagem(ns) das snapshots")
+    finally:
+        conn.close()
+
+
 def start():
     """Sobe o poller (idempotente). Não lança: falha vira estado, não exceção."""
     cfg = _load_cfg()
@@ -1093,5 +1172,9 @@ def start():
     except Exception as e:
         print(f"BYD: init_db falhou ({e}) — poller não sobe")
         return
+    try:
+        _backfill_trips_from_snapshots()
+    except Exception as e:
+        print(f"BYD: backfill de viagens falhou ({e}) — segue sem ele")
     threading.Thread(target=_thread_main, daemon=True, name="byd-poller").start()
     print(f"BYD: poller iniciado (idle={POLL_IDLE}s, carga/movimento={POLL_CHARGING}s)")

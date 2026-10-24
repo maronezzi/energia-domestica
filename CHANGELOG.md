@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] - 2026-10-24 (2)
+
+### Fixed
+- 🔧 **`oil_percent = 0` também é sentinela da BYD** — o tanque de um carro com 489 km de autonomia não está no 0%: em 22/10 a BYD mandou 0% por 2 leituras, a baseline do detector virou 0 e o retorno a 49% gerou **3 eventos FALSOS de abastecimento** (removidos do banco; o filtro na coleta agora manda 0 → None). Restou só o evento real de 24/10 (49→100%).
+- 🚗 **Viagens "invisíveis" reconstruídas** — 3 percursos do dono em 24/10 não viraram viagem: nenhum poll pegou `speed > 1,5` (idle 15 min + speed defasado), e a máquina de estados só abre viagem em movimento. Agora, quando o ODÔMETRO avança entre dois ciclos parados sem viagem aberta, a viagem é RECONSTRUÍDA dos dois extremos (km/SOC exatos, horário aproximado, sem trajeto — `_last_still_ts`/`_last_still_soc`). **Backfill one-shot** (gate `trips_backfill_v1`) varreu todas as snapshots e reconstruiu **16 viagens perdidas** desde 19/10 — a tabela agora fecha com o Δodômetro. Gap de interpolação: criação pula intervalos que intersectam viagens já registradas.
+- 🎯 **Sessão de carga de 24/10 arrancou com soc_start = 100 errado** — o `car_current_soc = 100` semeado no fim da carga de terça foi tomado como "input explícito do dono" pelo `estimate_car_soc_start` (o timestamp dele é posterior ao end_time da última sessão do DB), mas o carro tinha rodado 25 km (SOC real na tomada ≈ 52% pela BYD). O modelo saturava em 100% com 0,3 kWh entregues ("Meta atingida, balanceando") — inútil. Semeado o SOC real via `/api/car/soc?soc=52` (mesma ação do dono no dashboard; rebased a sessão). Lição para revisão futura: input "explícito" vindo de seed automático de finalize deveria ter marca própria (não confundir com input humano).
+- 🐛 Backfill: `t2` indefinido no filtro de interseção (NameError em runtime — o teste local não pegou porque `any()` sobre lista vazia não avalia o corpo; teste refeito com viagem intersectante).
+
 ## [Unreleased] - 2026-10-24
 
 ### Fixed
