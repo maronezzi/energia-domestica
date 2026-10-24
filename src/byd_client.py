@@ -368,6 +368,7 @@ def _maybe_learn_home():
 # estado da viagem em construção (thread do poller só)
 _trip: dict | None = None
 _trip_still = 0
+_last_still_odo = None  # último odo lido com o carro parado (âncora de abertura)
 
 
 def _trip_distance_home(point, conn):
@@ -381,17 +382,23 @@ def _trip_distance_home(point, conn):
 
 def _update_trip(snap: dict, pos: dict | None, moving: bool):
     """Máquina de viagens: abre em movimento, fecha após 2 ciclos parado.
-    km vem do Δodômetro (confiável); GPS só contextualiza início/fim."""
-    global _trip, _trip_still
+    km vem do Δodômetro (confiável); GPS só contextualiza início/fim.
+    O início é ancorado no ÚLTIMO odo lido PARADO: o trecho dirigido antes
+    de o speed chegar defasado pela BYD não se perde (a soma das viagens
+    passa a fechar com o Δodômetro do dia — antes 31 km viravam 28)."""
+    global _trip, _trip_still, _last_still_odo
     odo = snap.get("odo_km")
-    if odo is None:
-        return
+    if odo is None or odo <= 0:
+        return  # odo_km = 0 é sentinela da BYD, não é leitura
+    if not moving:
+        _last_still_odo = odo
     if moving:
         _trip_still = 0
         point = {"lat": pos["lat"], "lon": pos["lon"]} if pos else None
         if _trip is None:
             _trip = {
-                "start_ts": snap["ts"], "start_odo": odo,
+                "start_ts": snap["ts"],
+                "start_odo": _last_still_odo if _last_still_odo else odo,
                 "soc_start": snap.get("soc"),
                 "start_point": point, "end_point": point,
                 "end_ts": snap["ts"], "end_odo": odo,
@@ -667,16 +674,19 @@ def trips_for_day(date_str: str) -> list[dict]:
     return out
 
 
-def daily_trips(days: int = 14) -> dict:
-    """Por dia local (BRT): km rodados, kWh EV estimado (ΔSOC × bateria) e
-    contagem de viagens — derivados de byd_trips."""
-    days = max(1, min(int(days), 90))
-    since = time.time() - days * 86400
+def _odo_series(days_back: int) -> dict:
+    """Séries por dia/mês local (BRT) a partir de byd_snapshots: primeiro e
+    último ODÔMETRO VÁLIDO do período (odo_km = 0 é sentinela da BYD e é
+    descartado — viu-se em 19/10 e 22/10) e kWh EV = soma dos ΔSOC negativos
+    entre pares consecutivos COM o odômetro avançando (dreno fantasma de SOC
+    parado, tipo 30→26 na garagem, não é condução e não entra)."""
+    since = time.time() - days_back * 86400
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         rows = conn.execute(
-            "SELECT start_ts, end_ts, start_odo, end_odo, soc_start, soc_end "
-            "FROM byd_trips WHERE start_ts >= ? ORDER BY start_ts",
+            "SELECT ts, odo_km, soc FROM byd_snapshots "
+            "WHERE ts >= ? AND odo_km IS NOT NULL AND odo_km > 0 "
+            "ORDER BY ts",
             (since,),
         ).fetchall()
         conn.close()
@@ -684,18 +694,57 @@ def daily_trips(days: int = 14) -> dict:
         return {}
     battery_kwh = 12.9  # mesmo default do dashboard (car_battery_kwh)
     out: dict = {}
-    for start_ts, end_ts, o1, o2, s1, s2 in rows:
+    prev = None  # (ts, odo, soc)
+    for ts, odo, soc in rows:
+        day_key = _brt_day(ts)
+        d = out.setdefault(
+            day_key, {"odo_first": odo, "odo_last": odo, "kwh_ev": 0.0}
+        )
+        d["odo_last"] = odo
+        if prev is not None:
+            p_ts, p_odo, p_soc = prev
+            d_odo = odo - p_odo
+            if d_odo > 0 and soc is not None and p_soc is not None and soc < p_soc:
+                d["kwh_ev"] += (p_soc - soc) / 100.0 * battery_kwh
+            elif d_odo > 0 and d["odo_first"] > odo:
+                d["odo_first"] = odo
+        prev = (ts, odo, soc)
+    return out
+
+
+def daily_trips(days: int = 14) -> dict:
+    """Por dia local (BRT): km rodados medidos pelo ODÔMETRO do carro (a
+    verdade — a soma de viagens por janelas de movimento perde trechos entre
+    polls), kWh EV estimado (ΔSOC só quando o odômetro avança) e contagem/
+    duração de viagens (de byd_trips)."""
+    days = max(1, min(int(days), 90))
+    odo = _odo_series(days)
+    try:
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        rows = conn.execute(
+            "SELECT start_ts, end_ts FROM byd_trips WHERE start_ts >= ?",
+            (time.time() - days * 86400,),
+        ).fetchall()
+        conn.close()
+    except sqlite3.OperationalError:
+        rows = []
+    out: dict = {}
+    for day, o in odo.items():
+        out[day] = {
+            "km": round(max(0.0, o["odo_last"] - o["odo_first"]), 1),
+            "kwh_ev": round(o["kwh_ev"], 2),
+            "trips": 0,
+            "seconds": 0,
+        }
+    for start_ts, end_ts in rows:
         day = _brt_day(start_ts)
-        d = out.setdefault(day, {"km": 0.0, "kwh_ev": 0.0, "trips": 0, "seconds": 0})
-        d["km"] += (o2 or 0) - (o1 or 0)
+        d = out.setdefault(
+            day, {"km": 0.0, "kwh_ev": 0.0, "trips": 0, "seconds": 0}
+        )
         d["trips"] += 1
         if end_ts and start_ts:
             d["seconds"] += max(0, int(end_ts - start_ts))
-        if s1 is not None and s2 is not None and s2 < s1:
-            d["kwh_ev"] += (s1 - s2) / 100.0 * battery_kwh
     for d in out.values():
-        d["km"] = round(d["km"], 1)
-        d["kwh_ev"] = round(d["kwh_ev"], 2)
         d["kwh_per_100km"] = (
             round(d["kwh_ev"] / d["km"] * 100, 1) if d["km"] >= 2 else None
         )
@@ -720,40 +769,58 @@ def last_trip_after(epoch: float | None) -> bool:
 
 
 def monthly_trips(months: int = 3) -> dict:
-    """Agregação mensal (BRT) das viagens: km, kWh EV estimado, contagem."""
+    """Agregação mensal (BRT): km medidos pelo ODÔMETRO do carro (odo de
+    abertura do 1º dia com dados × odo de fechamento do último), kWh EV por
+    ΔSOC com odômetro avançando, viagens/duração de byd_trips."""
     months = max(1, min(int(months), 24))
-    since = time.time() - months * 31 * 86400
+    odo = _odo_series(months * 31)
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         rows = conn.execute(
-            "SELECT start_ts, end_ts, start_odo, end_odo, soc_start, soc_end "
-            "FROM byd_trips WHERE start_ts >= ? ORDER BY start_ts",
-            (since,),
+            "SELECT start_ts, end_ts FROM byd_trips WHERE start_ts >= ?",
+            (time.time() - months * 31 * 86400,),
         ).fetchall()
         conn.close()
     except sqlite3.OperationalError:
-        return {}
-    battery_kwh = 12.9
+        rows = []
+    # _odo_series devolve dias em ordem cronológica de ts: o 1º dia do mês no
+    # range carrega o odo de abertura e o último o de fechamento
     out: dict = {}
-    for start_ts, end_ts, o1, o2, s1, s2 in rows:
+    for day, o in odo.items():
+        month = day[:7]
+        if month not in out:
+            out[month] = {
+                "odo_first": o["odo_first"], "odo_last": o["odo_last"],
+                "kwh_ev": 0.0, "trips": 0, "seconds": 0,
+            }
+        out[month]["odo_last"] = o["odo_last"]
+        out[month]["kwh_ev"] += o["kwh_ev"]
+    for start_ts, end_ts in rows:
         month = _brt_day(start_ts)[:7]
-        d = out.setdefault(
-            month, {"km": 0.0, "kwh_ev": 0.0, "trips": 0, "seconds": 0}
-        )
-        d["km"] += (o2 or 0) - (o1 or 0)
-        d["trips"] += 1
+        if month not in out:
+            out[month] = {
+                "odo_first": None, "odo_last": None,
+                "kwh_ev": 0.0, "trips": 0, "seconds": 0,
+            }
+        out[month]["trips"] += 1
         if end_ts and start_ts:
-            d["seconds"] += max(0, int(end_ts - start_ts))
-        if s1 is not None and s2 is not None and s2 < s1:
-            d["kwh_ev"] += (s1 - s2) / 100.0 * battery_kwh
-    for d in out.values():
-        d["km"] = round(d["km"], 1)
-        d["kwh_ev"] = round(d["kwh_ev"], 2)
-        d["kwh_per_100km"] = (
-            round(d["kwh_ev"] / d["km"] * 100, 1) if d["km"] >= 2 else None
+            out[month]["seconds"] += max(0, int(end_ts - start_ts))
+    final: dict = {}
+    for month, m in out.items():
+        km = (
+            round(max(0.0, m["odo_last"] - m["odo_first"]), 1)
+            if m["odo_first"] is not None and m["odo_last"] is not None
+            else 0.0
         )
-        d["hours"] = round(d["seconds"] / 3600, 2)
-    return out
+        final[month] = {
+            "km": km,
+            "kwh_ev": round(m["kwh_ev"], 2),
+            "kwh_per_100km": round(m["kwh_ev"] / km * 100, 1) if km >= 2 else None,
+            "trips": m["trips"],
+            "seconds": m["seconds"],
+            "hours": round(m["seconds"] / 3600, 2),
+        }
+    return final
 
 
 def fuel_events(days: int = 90) -> list[dict]:
@@ -835,7 +902,10 @@ async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
         "range_ev": _f(getattr(rt, "ev_endurance", None)),
         "range_oil": _f(getattr(rt, "oil_endurance", None)),
         "oil_percent": _f(getattr(rt, "oil_percent", None)),
-        "odo_km": _f(getattr(rt, "total_mileage", None)),
+        # odo_km = 0 é sentinela da BYD (viu-se em 19/10 e 22/10), não leitura
+        "odo_km": None if not _f(getattr(rt, "total_mileage", None)) else _f(
+            getattr(rt, "total_mileage", None)
+        ),
         "speed": _f(getattr(rt, "speed", None)),
         "charge_state": _i(getattr(rt, "charge_state", None)),
         "is_charging": bool(getattr(rt, "is_charging", False)),

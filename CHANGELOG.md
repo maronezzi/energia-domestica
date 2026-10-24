@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased] - 2026-10-24
+
+### Fixed
+- 🛣️ **Km/dia medidos pelo ODÔMETRO do carro (fonte da verdade) — a soma de viagens perdia até 80% dos km** — o dono flagrou: "tem algo errado no km por dia". Confirmado nos dados: 21/10 o carro andou **42 km** (odômetro 29105→29147) e as viagens somaram **9**; 23/10: 31 vs 8; 22/10: 67 vs 33. Causa: a máquina de viagens depende do `speed` da BYD, que chega DEFASADO (mesmo padrão do `is_charging` — o carro reporta quando quer), e o poller idle lê a cada 15 min — o trecho dirigido entre leituras simplesmente não vira viagem. **`daily_trips()` e `monthly_trips()` reescritos**: km = 1º/último odo VÁLIDO do período em `byd_snapshots` (dia: último−primeiro; mês: abertura×fechamento), com **filtro do sentinela `odo_km = 0`** (mais um zero da BYD — apareceu em 19/10 e 22/10 e chegou a somar 29.073 km "rodados" num dia); **kWh EV = ΔSOC negativo SOMENTE quando o odômetro avança** (o dreno fantasma de SOC parado — 30→26 na garagem — não é condução e saiu da conta); viagens/duração continuam de `byd_trips`. Resultado real: Out/26 saltou de ~148 km estimados para **203 km reais** e 26,83 kWh EV. **Máquina de viagens também melhorada**: início ancorado no último odo lido PARADO (`_last_still_odo`) — o trecho dirigido antes de o speed defasado chegar não se perde mais, e a soma das viagens passa a fechar com o Δodômetro do dia. Rodapé do diário atualizado ("medidos pelo ODÔMETRO"). Histórico corrigido retroativamente (o daily é derivado das snapshots ao vivo).
+- 🧟 **Processo órfão segurou a porta 8050 e o serviço novo entrou em crash-loop** — após o deploy, o processo antigo não morreu no restart (fora do rastro do supervise-daemon), o novo falhava com errno 98 (respawn-max 10 estourou → status "stopped" com o dashboard RESPONDENDO código velho). Limpeza: matar órfão + supervisores duplicados, start único (1 supervisor, 1 python, porta certa). Nota: o init.d da placa foi reescrito entretanto (respawn-max 10/period 600, env via -e) — o novo respawn-max dá para esgotar em cascata de errno 98; monitorar.
+
 ## [Unreleased] - 2026-10-20
 
 ### Fixed
