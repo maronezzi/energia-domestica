@@ -482,6 +482,15 @@ def _update_trip(snap: dict, pos: dict | None, moving: bool):
     if _trip_still < TRIP_END_STILL_CYCLES:
         return
     trip, _trip, _trip_still = _trip, None, 0
+    # Corrida do fechamento: o trecho dirigido entre o 1º e o 2º ciclo parado
+    # (nenhum poll pegou speed — cadência idle de 15 min) não atualizou o
+    # end_odo, e a âncora _last_still_odo já foi reescrita neste ciclo — o km
+    # escaparia da viagem E da reconstrução (7 de 60 km em 25-27/10). O trecho
+    # pertence a ESTA viagem: estende o fim até o odômetro atual.
+    if odo - (trip.get("end_odo") or 0) >= TRIP_MIN_KM:
+        trip.update(end_ts=snap["ts"], end_odo=odo, soc_end=snap.get("soc"))
+        if pos:
+            trip["end_point"] = {"lat": pos["lat"], "lon": pos["lon"]}
     km = (trip["end_odo"] or 0) - (trip["start_odo"] or 0)
     if km < TRIP_MIN_KM:
         return

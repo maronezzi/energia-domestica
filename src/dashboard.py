@@ -1134,9 +1134,12 @@ def finalize_charge_session(session_uuid, end_energy_kwh, soc_end, end_reason="m
             _cfg_end = load_config()
             _cfg_end["car_current_soc"] = int(soc_end)  # inteiro: piso (conservador)
             _cfg_end["car_current_soc_ts"] = end_dt.isoformat()
-            # Âncora BYD: se o carro reportou SOC recentemente, o valor real
-            # substitui o soc_end projetado (fim de carga = transição de âncora).
-            _byd_soc = byd_client.fresh_soc()
+            # Seed automática — NÃO é input do dono (estimate_car_soc_start
+            # usa isso para não tratar 100 de fim de carga como partida real)
+            _cfg_end["car_current_soc_src"] = "seed"
+            # Âncora BYD: se o carro reportou SOC recentemente E plausível, o
+            # valor real substitui o soc_end projetado (fim de carga = âncora).
+            _byd_soc = _byd_anchor_soc()
             if _byd_soc is not None:
                 _cfg_end["car_current_soc"] = int(_byd_soc)
                 _cfg_end["car_current_soc_ts"] = datetime.now().isoformat()
@@ -1413,6 +1416,20 @@ def charge_sessions_summary(days=90, limit_days=None, since=None):
         conn.close()
 
 
+def _byd_anchor_soc():
+    """SOC BYD fresco e PLAUSÍVEL para virar âncora de partida (2–98%).
+
+    A BYD manda 0 como sentinela junto dos odo=0/oil=0 (carro dormindo —
+    provado nos snapshots) e 100 satura o modelo (sessões "100→100" de
+    21-22/10 com o carro entrando a ~24%). Nenhum dos dois é partida de
+    carga real; para EXIBIÇÃO do SOC atual, use fresh_soc() direto.
+    """
+    soc = byd_client.fresh_soc()
+    if soc is None or not (2.0 <= soc <= 98.0):
+        return None
+    return soc
+
+
 def estimate_car_soc_start(cfg):
     """Estimate the car's SOC when a session starts without explicit input
     (breaker flipped manually — auto-detect path).
@@ -1441,18 +1458,23 @@ def estimate_car_soc_start(cfg):
 
     cfg_soc = cfg.get("car_current_soc")
     cfg_ts = cfg.get("car_current_soc_ts")
+    # Proveniência do valor no config: 'owner' = input real do dono (vence
+    # tudo); 'seed' = gravação automática do finalize/início de sessão (lição
+    # 24/10: seed não é input humano — a seed 100 de um fim de carga pleno
+    # virou soc_start de sessões que entraram a ~24%). Configs antigos sem a
+    # marca são tratados como owner (comportamento de antes).
+    cfg_is_owner = (cfg.get("car_current_soc_src") or "owner") == "owner"
 
     def _clamp(v):
         return max(0.0, min(100.0, float(v)))
 
-    # Âncora BYD: SOC REAL recente (leitura direta do carro) vence qualquer
-    # heurística, mas perde para input explícito do usuário (checado acima).
+    # Âncora BYD: SOC REAL recente E plausível (2–98%, via _byd_anchor_soc).
     # estimated=True de propósito: a η continua aprendendo só com partida
     # confirmada pelo dono (regra 10/10) — o SOC real apenas semeia o modelo.
-    byd_soc = byd_client.fresh_soc()
+    byd_soc = _byd_anchor_soc()
     if row:
         soc_end, soc_start, end_time, end_reason = row
-        if cfg_soc is not None and cfg_ts:
+        if cfg_soc is not None and cfg_ts and cfg_is_owner:
             try:
                 if datetime.fromisoformat(str(cfg_ts)) > datetime.fromisoformat(
                     str(end_time)
@@ -1465,13 +1487,28 @@ def estimate_car_soc_start(cfg):
             # log aqui inundaria o service.log (lição do b773e33)
             return int(_clamp(byd_soc)), True
         # Sessão completa (carro encheu sozinho): usa o SOC inicial reconciliado
-        if end_reason == "auto" and soc_end >= 99 and soc_start is not None:
+        # — melhor estimativa que a seed do finalize — se ele for plausível
+        # (uma reconciliação envenenada por soc_start 0/100 não re-venena).
+        if (
+            end_reason == "auto"
+            and soc_end >= 99
+            and soc_start is not None
+            and 2.0 <= soc_start <= 98.0
+        ):
             return int(_clamp(soc_start)), True
+        # Seed automática do finalize: vale como estimativa, mas só se
+        # plausível (0/100 semeado não vira âncora de partida).
+        if cfg_soc is not None and cfg_ts and not cfg_is_owner:
+            if 2.0 <= cfg_soc <= 98.0:
+                return int(_clamp(cfg_soc)), True
         return int(_clamp(soc_end)), True
     if byd_soc is not None:
         return int(_clamp(byd_soc)), True
     if cfg_soc is not None:
-        return int(_clamp(cfg_soc)), False
+        if cfg_is_owner:
+            return int(_clamp(cfg_soc)), False
+        if 2.0 <= cfg_soc <= 98.0:
+            return int(_clamp(cfg_soc)), True
     return 50.0, True
 
 
@@ -2621,7 +2658,7 @@ def poll_loop():
                 soc_confirmed = not soc_estimated
                 if (
                     not soc_confirmed
-                    and byd_client.fresh_soc() is not None
+                    and _byd_anchor_soc() is not None
                     and _departure_confirmed()
                 ):
                     soc_confirmed = True
@@ -2648,7 +2685,7 @@ def poll_loop():
                 # GPS e a η perdeu a chance de aprender)
                 cfg_detect["car_soc_confirmed"] = soc_confirmed
                 cfg_detect["car_soc_start_real"] = (
-                    not soc_estimated or byd_client.fresh_soc() is not None
+                    not soc_estimated or _byd_anchor_soc() is not None
                 )
                 save_config(cfg_detect)
                 print("⚡ Auto-detected charging: breaker ON with power, starting session")
@@ -3504,6 +3541,7 @@ def api_car_soc(soc: int = 0):
     cfg = load_config()
     cfg["car_current_soc"] = max(0, min(100, soc))
     cfg["car_current_soc_ts"] = datetime.now().isoformat()
+    cfg["car_current_soc_src"] = "owner"  # input humano vence seed e BYD
     save_config(cfg)
     # Mid-session correction: rebase the tracker (effective_soc follows the
     # informed value immediately) and the session row so the report is truthful.
@@ -3581,7 +3619,7 @@ def api_car_start_charge():
         soc_confirmed = not _soc_estimated
         if (
             not soc_confirmed
-            and byd_client.fresh_soc() is not None
+            and _byd_anchor_soc() is not None
             and _departure_confirmed()
         ):
             soc_confirmed = True
@@ -3604,7 +3642,7 @@ def api_car_start_charge():
         cfg["car_charge_start_soc"] = soc_start
         cfg["car_soc_confirmed"] = soc_confirmed
         cfg["car_soc_start_real"] = (
-            not _soc_estimated or byd_client.fresh_soc() is not None
+            not _soc_estimated or _byd_anchor_soc() is not None
         )
         save_config(cfg)
         return {
