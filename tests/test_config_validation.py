@@ -193,3 +193,57 @@ class TestConfigValidation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSessionCleanupOnAuthFailure(unittest.TestCase):
+    """Sessão salva envenenada é removida; falha de rede a preserva."""
+
+    def setUp(self):
+        import byd_client as bc
+        self.bc = bc
+        self._orig = bc.SESSION_FILE
+        bc.SESSION_FILE = Path(_tmpdir) / "data" / "byd_session.json"
+        bc.SESSION_FILE.write_text("{}")
+
+    def tearDown(self):
+        self.bc.SESSION_FILE = self._orig
+        if self.bc.SESSION_FILE.name == "byd_session.json" and self.bc.SESSION_FILE.exists() \
+                and str(self.bc.SESSION_FILE).startswith(_tmpdir):
+            self.bc.SESSION_FILE.unlink()
+
+    def _exc(self, name):
+        return type(name, (Exception,), {})(name)
+
+    def test_crypto_failure_removes_file(self):
+        # token salvo que falha na descriptografia → arquivo fora
+        self.assertTrue(self.bc._session_cleanup_on_auth_failure(
+            self._exc("BydCryptoError"), used_saved=True, proven=False))
+        self.assertFalse(self.bc.SESSION_FILE.exists())
+
+    def test_auth_failure_removes_file(self):
+        self.assertTrue(self.bc._session_cleanup_on_auth_failure(
+            self._exc("BydAuthenticationError"), used_saved=True, proven=False))
+        self.assertFalse(self.bc.SESSION_FILE.exists())
+
+    def test_transport_failure_keeps_file(self):
+        # rede caiu: o token continua válido, nada é apagado
+        self.assertFalse(self.bc._session_cleanup_on_auth_failure(
+            self._exc("BydTransportError"), used_saved=True, proven=False))
+        self.assertTrue(self.bc.SESSION_FILE.exists())
+
+    def test_proven_session_keeps_file(self):
+        # sessão já completou coletas: erro depois não é culpa do arquivo
+        self.assertFalse(self.bc._session_cleanup_on_auth_failure(
+            self._exc("BydCryptoError"), used_saved=True, proven=True))
+        self.assertTrue(self.bc.SESSION_FILE.exists())
+
+    def test_fresh_login_failure_keeps_file(self):
+        # falha SEM sessão restaurada não tem arquivo para apagar
+        self.assertFalse(self.bc._session_cleanup_on_auth_failure(
+            self._exc("BydAuthenticationError"), used_saved=False, proven=False))
+        self.assertTrue(self.bc.SESSION_FILE.exists())
+
+    def test_missing_file_is_noop(self):
+        self.bc.SESSION_FILE.unlink()
+        self.assertFalse(self.bc._session_cleanup_on_auth_failure(
+            self._exc("BydCryptoError"), used_saved=True, proven=False))

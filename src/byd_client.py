@@ -1009,6 +1009,27 @@ def _session_sync(client) -> None:
         print(f"BYD: falha ao persistir sessão: {e}")
 
 
+def _session_cleanup_on_auth_failure(exc: BaseException, used_saved: bool, proven: bool) -> bool:
+    """Sessão salva envenenada → apaga o arquivo (o próximo ciclo loga de verdade).
+
+    Sem isso, um token salvo que a BYD recusa com erro de CRIPTO (e não de
+    sessão expirada) seria reinjetado em loop infinito — o login cego de antes
+    se recuperava sozinho. Falhas de REDE preservam a sessão: o token continua
+    válido. `proven` = alguma coleta já completou com essa sessão.
+    """
+    if not used_saved or proven:
+        return False
+    name = type(exc).__name__
+    if not ("Crypto" in name or "Auth" in name or "Session" in name):
+        return False
+    try:
+        SESSION_FILE.unlink()
+    except OSError:
+        return False
+    print(f"BYD: sessão salva rejeitada ({name}) — arquivo removido; próximo ciclo loga de novo")
+    return True
+
+
 def _courtesy_reauth(client) -> dict | None:
     """Retarda o re-login automático do pybyd quando o token é rejeitado.
 
@@ -1137,6 +1158,7 @@ async def _run_loop():
     backoff_k = 0
     err_count = 0
     while True:
+        injected_this_run = False
         try:
             # imports de dentro do loop: pybyd ausente ou config inválida vira
             # estado + backoff (visível na aba), não morte silenciosa da thread
@@ -1146,6 +1168,7 @@ async def _run_loop():
             async with BydClient(byd_cfg) as client:
                 _reauth_state = _courtesy_reauth(client)
                 if _session_inject(client):
+                    injected_this_run = True
                     print("BYD: sessão restaurada do disco — sem login novo (app do dono preservado)")
                 else:
                     await client.login()
@@ -1232,6 +1255,9 @@ async def _run_loop():
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            _session_cleanup_on_auth_failure(
+                e, injected_this_run, (_reauth_state or {}).get("proven", False)
+            )
             backoff_k += 1
             wait = min(BACKOFF_MAX, BACKOFF_MIN * (2 ** (backoff_k - 1)))
             name = type(e).__name__
