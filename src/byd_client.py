@@ -27,6 +27,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = BASE_DIR / "data" / "byd.json"
 DB_FILE = BASE_DIR / "data" / "tuya_history.db"
+SESSION_FILE = BASE_DIR / "data" / "byd_session.json"  # tokens do login (0600)
 
 POLL_MOVING = 60      # carro em movimento (base do diário de bordo, fase 2)
 POLL_CHARGING = 60    # carregando
@@ -36,6 +37,7 @@ GPS_EVERY_MOVING = 2  # gps a cada N ciclos em movimento
 GPS_EVERY_STILL = 4
 BACKOFF_MIN = 30
 BACKOFF_MAX = 1800
+SESSION_COURTESY_S = 600  # token rejeitado: segura o re-login 10 min (o dono usa o app)
 ERR_LOG_EVERY = 30    # não inundar o service.log (mesmo molde do err_streak)
 SOC_FRESH_MAX_AGE = 1800   # âncora: dado do carro com até 30 min
 POLL_FRESH_MAX_AGE = 900   # âncora: coleta nossa com até 15 min
@@ -923,7 +925,128 @@ def _build_byd_config(cfg: dict):
 
     kwargs = {k: cfg[k] for k in CFG_KEYS if cfg.get(k) is not None}
     kwargs["mqtt_enabled"] = bool(cfg.get("mqtt_enabled", False))
+    # TTL 0 desliga o re-login proativo de 12 h do pybyd: cada login novo
+    # pode invalidar a sessão do app MY BYD do dono. Re-login passa a acontecer
+    # só quando a BYD rejeita o token de verdade (BydSessionExpiredError).
+    kwargs["session_ttl"] = 0
     return BydConfig(**kwargs)
+
+
+# ── Coexistência com o app MY BYD do dono ────────────────────────────
+# O cloud da BYD liga cada login a uma sessão e um login novo pode derrubar
+# a anterior — o relato do dono é exatamente esse (sistema conecta, app cai).
+# Estratégia: logar UMA vez e persistir os tokens (data/byd_session.json,
+# 0600); restarts e o fim do serviço deixam de gerar login; quando a BYD
+# rejeitar o token, o re-login espera uma janela de cortesia para o dono
+# conseguir usar o app sem ser chutado de volta.
+# pybyd é pinado em 0.0.79 (requirements.txt): `_session` e
+# `_call_with_reauth` são privados da lib e conferidos contra essa versão.
+
+_reauth_state: dict | None = None
+_last_saved_token: str | None = None
+
+
+def _session_save(client) -> None:
+    s = getattr(client, "_session", None)
+    if s is None:
+        return
+    data = {
+        "user_id": s.user_id,
+        "sign_token": s.sign_token,
+        "encry_token": s.encry_token,
+        "saved_ts": time.time(),
+    }
+    tmp = SESSION_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.chmod(0o600)
+    tmp.replace(SESSION_FILE)
+
+
+def _session_load() -> dict | None:
+    try:
+        data = json.loads(SESSION_FILE.read_text())
+    except Exception:
+        return None
+    if all(
+        isinstance(data.get(k), str) and data[k]
+        for k in ("user_id", "sign_token", "encry_token")
+    ):
+        return data
+    return None
+
+
+def _session_inject(client) -> bool:
+    """Restaura a sessão salva; evita login novo ao reiniciar o serviço."""
+    global _last_saved_token
+    data = _session_load()
+    if not data:
+        return False
+    try:
+        from pybyd.session import Session
+
+        client._session = Session(
+            user_id=data["user_id"],
+            sign_token=data["sign_token"],
+            encry_token=data["encry_token"],
+            ttl=float("inf"),
+        )
+        _last_saved_token = data["sign_token"]
+        return True
+    except Exception:
+        return False
+
+
+def _session_sync(client) -> None:
+    """Persiste a sessão quando o pybyd re-loga por fora (tokens mudaram)."""
+    global _last_saved_token
+    s = getattr(client, "_session", None)
+    if s is None or s.sign_token == _last_saved_token:
+        return
+    try:
+        _session_save(client)
+        _last_saved_token = s.sign_token
+    except Exception as e:
+        print(f"BYD: falha ao persistir sessão: {e}")
+
+
+def _courtesy_reauth(client) -> dict | None:
+    """Retarda o re-login automático do pybyd quando o token é rejeitado.
+
+    Sem isso, o dono logar no app invalida nosso token e o pybyd re-loga na
+    hora — derrubando o app de volta (ping-pong invisível no service.log).
+    A cortesia só é armada depois que a sessão atual já completou uma coleta
+    (state['proven']): boot com token morto re-loga direto, sem espera.
+    """
+    try:
+        from pybyd.exceptions import BydSessionExpiredError
+
+        original = client._call_with_reauth
+    except Exception:
+        return None  # pybyd inesperado: comportamento padrão da lib
+    state = {"proven": False, "first_reject": None}
+
+    async def wrapped(fn):
+        try:
+            return await fn()
+        except BydSessionExpiredError:
+            if not state["proven"]:
+                print("BYD: token salvo rejeitado pela BYD — logando de novo")
+                return await original(fn)
+            now = time.monotonic()
+            if state["first_reject"] is None:
+                state["first_reject"] = now
+                print(
+                    "BYD: token rejeitado (alguém logou na conta?) — "
+                    f"aguardando {SESSION_COURTESY_S // 60} min para não derrubar o app do dono"
+                )
+            if now - state["first_reject"] < SESSION_COURTESY_S:
+                raise  # janela de cortesia: o erro sobe para o loop de coleta
+            state["first_reject"] = None
+            print("BYD: fim da janela de cortesia — re-logando")
+            return await original(fn)
+
+    client._call_with_reauth = wrapped
+    return state
 
 
 async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
@@ -1009,6 +1132,7 @@ def _next_interval(snap: dict, moving: bool) -> float:
 
 
 async def _run_loop():
+    global _reauth_state
     cfg = _load_cfg()
     backoff_k = 0
     err_count = 0
@@ -1020,7 +1144,13 @@ async def _run_loop():
 
             byd_cfg = _build_byd_config(cfg)
             async with BydClient(byd_cfg) as client:
-                await client.login()
+                _reauth_state = _courtesy_reauth(client)
+                if _session_inject(client):
+                    print("BYD: sessão restaurada do disco — sem login novo (app do dono preservado)")
+                else:
+                    await client.login()
+                    _session_sync(client)
+                    print("BYD: login efetuado — sessão persistida (esperado só na 1ª execução ou se a BYD invalidar o token)")
                 vehicles = await client.get_vehicles()
                 vin = cfg.get("vin") or (
                     getattr(vehicles[0], "vin", None) if vehicles else None
@@ -1057,6 +1187,11 @@ async def _run_loop():
                             _st["last_error"] = str(e)
                         await asyncio.sleep(POLL_CHARGING)
                         continue
+                    # coleta OK: sessão provada (cortesia armada) e tokens
+                    # novos — de re-login interno do pybyd — são persistidos
+                    if _reauth_state is not None:
+                        _reauth_state["proven"] = True
+                    _session_sync(client)
                     save_err = None
                     try:
                         _save_cycle(snap, pos)
