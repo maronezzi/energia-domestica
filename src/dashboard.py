@@ -3386,7 +3386,7 @@ def api_byd_monthly(months: int = 3):
         crows = conn.execute(
             "SELECT substr(start_time,1,7), SUM(energy_delivered_kwh), "
             "SUM(total_cost) FROM charge_sessions "
-            "WHERE start_time >= ? AND status IN ('completed','auto_stopped') "
+            "WHERE start_time >= ? AND status IN ('completed','auto_stopped','reconstructed') "
             "GROUP BY substr(start_time,1,7)",
             (since_iso,),
         ).fetchall()
@@ -3441,7 +3441,7 @@ def api_byd_daily(days: int = 14):
         rows = conn.execute(
             "SELECT substr(start_time,1,10), SUM(energy_delivered_kwh), "
             "SUM(total_cost) FROM charge_sessions "
-            "WHERE start_time >= ? AND status IN ('completed','auto_stopped') "
+            "WHERE start_time >= ? AND status IN ('completed','auto_stopped','reconstructed') "
             "GROUP BY substr(start_time,1,10)",
             (since,),
         ).fetchall()
