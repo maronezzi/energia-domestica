@@ -1403,7 +1403,7 @@ async function setBreaker(on) {
     const a = document.getElementById('carAlert');
     a.className = 'alert info'; a.textContent = on ? '⏳ Ligando...' : '⏳ Desligando...';
     try {
-        const r = await fetch(`/api/breaker/switch?on=${on}`, {method:'POST'});
+        const r = await fetch(on ? '/api/breaker/on' : '/api/breaker/off', {method:'POST'});
         const d = await r.json();
         if (d.success) { a.className = 'alert ok'; a.textContent = on ? '✅ LIGADO!' : '✅ DESLIGADO!'; setTimeout(()=>a.className='alert',3000); fetchStatus(); }
         else { a.className = 'alert err'; a.textContent = '❌ ' + (d.error||'Erro'); }
@@ -1419,14 +1419,25 @@ async function loadHistory() {
             fetch(`/api/monthly?year=${curYear}&month=${curMonth}`),
             fetch(`/api/daily-history?year=${curYear}&month=${curMonth}`),
         ]);
+        if (!monthly.ok || !daily.ok) throw new Error(`HTTP ${monthly.status}/${daily.status}`);
         const mData = await monthly.json(), dData = await daily.json();
         renderSummary(mData);
         renderDailyChart(dData.days);
         renderTable(dData.days);
-    } catch(e) { console.error('History error:', e); }
+    } catch(e) {
+        console.error('History error:', e);
+        // não deixar números do mês anterior embaixo de um título novo
+        renderSummary({});
+        renderTable(null);
+    }
 }
 
-function chgMonth(d) { curMonth+=d; if(curMonth>12){curMonth=1;curYear++} if(curMonth<1){curMonth=12;curYear--} loadHistory(); }
+function chgMonth(d) {
+    const n = new Date();
+    // ▶ não entra em mês futuro (só mostraria título novo com dado velho)
+    if (d > 0 && (curYear > n.getFullYear() || (curYear === n.getFullYear() && curMonth >= n.getMonth() + 1))) return;
+    curMonth+=d; if(curMonth>12){curMonth=1;curYear++} if(curMonth<1){curMonth=12;curYear--} loadHistory();
+}
 function goToday() { const n=new Date(); curYear=n.getFullYear(); curMonth=n.getMonth()+1; loadHistory(); }
 
 function renderSummary(d) {
@@ -1668,11 +1679,14 @@ async function loadCharges() {
 async function saveKwh() {
     const raw = document.getElementById('kwhInput').value.replace(',', '.');
     const v = parseFloat(raw);
-    if (isNaN(v) || v <= 0) return;
+    if (isNaN(v) || v <= 0 || v > 100) return;
+    const a = document.getElementById('settingsOk');
+    const r = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({kwh_cost:v})});
+    if (!r.ok) { a.textContent = '❌ Tarifa inválida (0–100)'; a.style.display = 'block'; setTimeout(()=>a.style.display='none',6000); return; }
+    a.textContent = '✅ Salvo!';
     document.getElementById('kwhInput').value = raw;
-    await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({kwh_cost:v})});
     kwhCost = v; document.getElementById('kwhDisplay').value = v.toFixed(3);
-    const a = document.getElementById('settingsOk'); a.style.display = 'block'; setTimeout(()=>a.style.display='none',3000);
+    a.style.display = 'block'; setTimeout(()=>a.style.display='none',3000);
 }
 
 // ─── Aba Carro (BYD) ─────────────────────────────────────────
@@ -2032,8 +2046,15 @@ async function saveFuel() {
     if (!isNaN(price) && price > 0) body.car_fuel_price = price;
     if (!isNaN(tank) && tank > 0) body.car_tank_l = tank;
     if (!Object.keys(body).length) return;
-    await fetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
     const a = document.getElementById('fuelOk');
+    const r = await fetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        a.textContent = '❌ ' + ((d.invalid || []).join('; ') || d.error || 'valor inválido');
+        a.style.display = 'block'; setTimeout(() => a.style.display = 'none', 6000);
+        return;
+    }
+    a.textContent = '✅ Salvo!';
     a.style.display = 'block'; setTimeout(() => a.style.display = 'none', 3000);
 }
 

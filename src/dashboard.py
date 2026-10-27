@@ -7,6 +7,7 @@ LOCAL-FIRST: Coleta local ativa, cloud opcional sob demanda do usuário.
 """
 
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -18,7 +19,7 @@ import os
 
 import tinytuya
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 
 import byd_client  # poller BYD (thread própria; docs/ESTUDO_ABA_BYD.md)
@@ -283,6 +284,24 @@ def _migrate_utc_to_brt(conn):
     """
     _cfg = load_config()
     if _cfg.get("tz_brt_migrated"):
+        # Backfill da trava no DB (placas migradas antes de app_meta existir):
+        # o flag precisa sobreviver à perda do tuya_config.json.
+        if not conn.execute(
+            "SELECT 1 FROM app_meta WHERE key='tz_brt_migrated'"
+        ).fetchone():
+            conn.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('tz_brt_migrated', '1')"
+            )
+            conn.commit()
+        return
+    # Trava dupla: também no próprio SQLite. Se o config se perder, um
+    # restart NÃO re-desloca o histórico -3h de novo (o erro é composto).
+    if conn.execute(
+        "SELECT 1 FROM app_meta WHERE key='tz_brt_migrated'"
+    ).fetchone():
+        if not _cfg.get("tz_brt_migrated"):
+            _cfg["tz_brt_migrated"] = True
+            save_config(_cfg)
         return
     n_read = conn.execute(
         "UPDATE readings SET timestamp = strftime('%Y-%m-%dT%H:%M:%S', timestamp, '-3 hours')"
@@ -299,6 +318,10 @@ def _migrate_utc_to_brt(conn):
     _cfg.pop("snapshots_backfilled", None)  # force snapshot rebuild (BRT days)
     _cfg["last_snapshot_day"] = datetime.now().strftime("%Y-%m-%d")
     save_config(_cfg)
+    conn.execute(
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('tz_brt_migrated', '1')"
+    )
+    conn.commit()
     print(f"DB migration tz: {n_read} leituras e {n_sess} sessões movidas UTC→BRT (-3h); snapshots serão reconstruídos")
 
 
@@ -319,6 +342,14 @@ def init_db():
             breaker_balance_kwh REAL, breaker_temperature REAL,
             -- phase currents (from breaker DPS 101/102/103, in mA)
             phase_a REAL, phase_b REAL, phase_c REAL
+        )
+    """)
+    # Flags internas que devem sobreviver à perda do tuya_config.json
+    # (ex.: tz_brt_migrated — re-migrar desloca o histórico -3h de novo)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
     """)
     # Migrations: add new columns if upgrading from old schema
@@ -1726,6 +1757,9 @@ def db_daily_history(days=30, year=None, month=None):
             ]
             # dias futuros do mês corrente não existem — fora da tabela/gráfico
             sorted_days = [d for d in sorted_days if d <= today_str]
+            if not sorted_days:
+                # Mês inteiro no futuro (navegação ▶): sem dados, sem 500
+                return []
             start_day = sorted_days[0]
             tomorrow = nxt.strftime("%Y-%m-%d")
         else:
@@ -3012,6 +3046,10 @@ def api_today():
 def api_daily_history(
     days: int = 30, year: int = None, month: int = None
 ):
+    if (year is None) != (month is None):
+        raise HTTPException(status_code=400, detail="year e month devem vir juntos")
+    if year is not None and (not 1 <= month <= 12 or not 2000 <= year <= 2100):
+        raise HTTPException(status_code=400, detail="mês deve ser 1-12 e ano 2000-2100")
     days = max(1, min(days, 365))
     key = ("daily_history", days, year, month)
     return {"days": _ttl_get_or_compute(key, 45, lambda: db_daily_history(days=days, year=year, month=month))}
@@ -3091,6 +3129,8 @@ def db_monthly_stats(year: int, month: int):
 
 @app.get("/api/monthly")
 def api_monthly(year: int, month: int):
+    if not 1 <= month <= 12 or not 2000 <= year <= 2100:
+        raise HTTPException(status_code=400, detail="mês deve ser 1-12 e ano 2000-2100")
     key = ("monthly", year, month)
     return _ttl_get_or_compute(key, 45, lambda: db_monthly_stats(year, month))
 
@@ -3140,6 +3180,10 @@ def api_clear_db(before_days: int = 30):
 def api_hourly(date: str = None):
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
+    try:
+        datetime.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date deve ser YYYY-MM-DD")
     key = ("hourly", date)
     return _ttl_get_or_compute(key, 45, lambda: db_hourly(date))
 
@@ -3756,8 +3800,62 @@ def api_config_update(cfg: dict = None):
         "car_tank_l",
         "cloud_enabled",
     }
-    safe_cfg = {k: v for k, v in cfg.items() if k in ALLOWED_CONFIG_KEYS}
-    rejected = set(cfg.keys()) - set(safe_cfg.keys())
+    # Tipo e faixa por chave: valor ruim salvo no config vira 500 permanente
+    # nos agregados (ex.: kwh_cost=1e999 → Infinity quebra /api/today até
+    # correção manual no arquivo). Rejeição é all-or-nothing.
+    CONFIG_RANGES = {
+        "kwh_cost": (0.0, 100.0),
+        "car_battery_kwh": (1.0, 500.0),
+        "car_charge_power_w": (0.0, 22_000.0),
+        "car_target_soc": (5.0, 100.0),
+        "car_current_soc": (0.0, 100.0),
+        "car_charge_start_kwh": (0.0, 500.0),
+        "car_charge_start_soc": (0.0, 100.0),
+        "car_charge_idle_seconds_to_stop": (0.0, 86_400.0),
+        "car_charge_idle_power_w": (0.0, 11_000.0),
+        "car_charge_start_power_w": (0.0, 11_000.0),
+        "car_charge_efficiency": (0.5, 1.0),
+        "car_fuel_price": (0.0, 100.0),
+        "car_tank_l": (5.0, 200.0),
+    }
+    CONFIG_BOOL_KEYS = {"car_charging", "car_charge_auto_stop", "cloud_enabled"}
+    CONFIG_STR_KEYS = {"kwh_currency", "car_charge_start_time"}
+
+    safe_cfg = {}
+    rejected = set()
+    invalid = []
+    for k, v in cfg.items():
+        if k not in ALLOWED_CONFIG_KEYS:
+            rejected.add(k)
+        elif k in CONFIG_STR_KEYS:
+            if isinstance(v, str):
+                safe_cfg[k] = v
+            else:
+                invalid.append(f"{k}: esperado texto")
+        elif k in CONFIG_BOOL_KEYS:
+            if isinstance(v, bool):
+                safe_cfg[k] = v
+            else:
+                invalid.append(f"{k}: esperado true/false")
+        elif k in CONFIG_RANGES:
+            lo, hi = CONFIG_RANGES[k]
+            # bool é subclasse de int — rejeitar explicitamente
+            if (
+                isinstance(v, bool)
+                or not isinstance(v, (int, float))
+                or not math.isfinite(v)
+                or not (lo <= v <= hi)
+            ):
+                invalid.append(f"{k}: esperado número entre {lo} e {hi}")
+            else:
+                safe_cfg[k] = v
+        else:
+            invalid.append(f"{k}: sem validação definida")
+    if invalid:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "valor inválido", "invalid": invalid},
+        )
     current = load_config()
     current.update(safe_cfg)
     save_config(current)

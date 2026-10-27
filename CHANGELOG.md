@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased] - 2026-10-27
+
+### Added
+- 🤝 **Coexistência com o app MY BYD do celular — fim do "conectou, derrubou"** — enxame de validação provou o mecanismo: o cloud da BYD mantém UMA sessão por conta e cada login novo pode invalidar a anterior; o poller logava a CADA restart do serviço (38 starts = 38 logins na semana 19–26/10, com cluster de 22 seguidos) e ainda re-logava sozinho a cada 12 h (TTL default do pybyd) e silenciosamente em erro de token. Agora: **tokens persistidos** em `data/byd_session.json` (0600, gitignored) — restart restaura a sessão e NÃO loga de novo (`_session_inject`, fallback natural para login se a BYD rejeitar); **`session_ttl=0`** mata o re-login proativo de 12 h (só re-loga quando a BYD rejeitar o token de verdade); **janela de cortesia de 10 min** (`_courtesy_reauth`, wrapper de instância em `_call_with_reauth` do pybyd 0.0.79): se o dono logar no app e tomar a sessão, o poller aguenta as rejeições 10 min antes de re-logar — o app funciona durante o uso em vez de cair na hora; cortesia só arma depois da 1ª coleta OK (boot com token morto re-loga direto). Logs novos deixam os logins visíveis ("login efetuado — sessão persistida" / "sessão restaurada do disco — sem login novo"). Limite honesto: se o servidor BR impor 1 sessão/conta, o login MANUAL no app continua tomando a nossa sessão (e vice-versa após a cortesia) — solução definitiva é conta dedicada ao carro (compartilhamento multi-driver). pybyd pinado: acessos privados conferidos contra 0.0.79.
+
+### Fixed
+- 💥 **POST /api/config validava só chaves, não valores — `{"kwh_cost": 1e999}` (JSON válido) derrubava o dashboard INTEIRO para sempre** — `Infinity` persistia no tuya_config.json e `/api/today` + `/api/status` ficavam em 500 permanente (ValueError no serializer), sem caminho de volta pela UI. Agora cada chave tem tipo e faixa (`kwh_cost` 0–100, `car_tank_l` 5–200, `car_target_soc` 5–100, η 0,5–1,0, bools/strings tipados, `math.isfinite` barre NaN/±Inf): rejeição **all-or-nothing** com 400 e motivo (`invalid: [...]`); `saveKwh`/`saveFuel` mostram o erro em vez de "✅ Salvo!" em falso.
+- 🛡️ **Perda do tuya_config.json re-deslocava o histórico -3h A CADA restart** — a trava `tz_brt_migrated` vivia só no arquivo de config; sem ele, a migração UTC→BRT rodava de novo (provado em laboratório: 2 restarts roubaram 2,43 kWh do dia anterior). Trava dupla: flag `tz_brt_migrated` agora TAMBÉM na tabela `app_meta` dentro do próprio SQLite (sobrevive à perda do config; placas já migradas recebem backfill do flag no próximo boot).
+- 🗓️ **Navegação ▶ para mês futuro deixava 500 e a tabela do mês anterior embaixo do título novo** — `/api/daily-history` estourava `IndexError` em `sorted_days[0]` com mês todo no futuro; `/api/monthly` e `/api/daily-history` com `month=13/0` e `/api/hourly` com data inválida davam 500. Agora: 400 nos inválidos (year 2000–2100, month 1–12, year+month sempre juntos), mês futuro devolve `days: []` ("Sem dados"), e o frontend bloqueia ▶ no mês corrente + limpa painel em erro de rede.
+- 🔌 **`setBreaker()` chamava `/api/breaker/switch` que nunca existiu (404)** — função morta do JS apontava para rota fantasma; agora usa `/api/breaker/on|off` reais (continua sem botão ligado — código de reserva).
+
 ## [Unreleased] - 2026-10-24 (2)
 
 ### Fixed
