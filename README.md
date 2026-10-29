@@ -11,6 +11,7 @@ Sistema de **monitoramento e controle de energia residencial** com integração 
 ### Monitoramento
 - 📊 **Dashboard em tempo real** — consumo (W), tensão (V), corrente (A), energia acumulada (kWh)
 - 📈 **Gráficos** — potência em tempo real, energia diária, consumo horário
+- ⚡ **Analisador da rede (aba Rede)** — registro de **apagões** (a placa reinicia junto com a queda — início = última leitura, fim = boot da placa), tempo até restabelecer, eventos de **tensão baixa/alta** fora da faixa ANEEL e histórico de qualidade por dia
 - 💰 **Custo calculado** — baseado em tarifa configurável (R$/kWh)
 - 🌡️ **Status do disjuntor** — fault codes, temperatura, corrente por fase
 
@@ -145,6 +146,9 @@ Configurável em `data/tuya_config.json`:
 | `/api/charge/state` | GET | Estado da sessão de carga ativa |
 | `/api/charge/sessions` | GET | Lista de sessões (ativas e finalizadas) |
 | `/api/charge/summary` | GET | Resumo agregado (kWh, R$, duração) |
+| `/api/hourly` | GET | Consumo hora a hora de um dia |
+| `/api/outages` | GET | Apagões e eventos de tensão (resumo + lista, `?days=N`) |
+| `/api/power_quality` | GET | Analisador de tensão: mín/média/máx e % por faixa ANEEL/dia |
 | `/api/car/start-charge` | POST | Liga disjuntor + inicia tracking |
 | `/api/car/stop-charge` | POST | Desliga + finaliza sessão no DB |
 | `/api/breaker/on` | POST | Liga disjuntor direto |

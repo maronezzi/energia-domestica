@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-29
+
+### Added
+- ⚡ **Analisador da rede elétrica — registro de apagões e tempo até restabelecer, com aba "⚡ Rede" no dashboard** — a região do dono está com faltas frequentes e nada registrava. A prova física usada: **a placa morre junto com a rede** (mesma fonte), então REINÍCIO da placa depois da última leitura = apagão (`/proc/uptime` no boot do serviço; reinício de serviço com a placa de pé — deploy/vigia — não registra nada). Início do apagão = última leitura com energia; **fim = boot da placa** (a energia voltou quando ela voltou, não quando o serviço leu de novo). Com a placa viva, o **watcher de tensão no poll_loop** abre subtensão (<115 V) / sobtensão (>135 V) com 2 polls fora da faixa e fecha com 3 polls de volta na faixa adequada (histérese) — leitura FALHA (wifi do medidor) não abre evento falso. Faixas ANEEL (Res. 1.000/2021) por nominal `grid_nominal_v` (127 na casa: adequada 117–133, precária 103–117/133–135, crítica <103/>135; 220 na tabela p/ disjuntor). **Backfill 1×** (gate `outages_backfilled`): lacunas ≥ 15 min no histórico viram apagão estimado SÓ se o wtmp (`last -F reboot`) mostrar boot da placa dentro da lacuna — lacuna sem reboot é wifi/serviço; sem wtmp, todas viram estimadas; lacunas > 2 dias (sistema desligado de propósito) ignoradas. Eventos colados (<120s, mesmo tipo) fundem — micro-piscadas em sequência contam como um incidente. Tabela nova `outages` + APIs `/api/outages?days=N` (resumo: qtde, tempo total sem energia, maior e última falta) e `/api/power_quality?days=N` (mín/média/máx + % do tempo em cada faixa ANEEL por dia). Aba nova com 5 cards (tensão agora + zona, apagões, tempo sem energia, maior, última), gráfico de tensão mín–máx por dia colorido pela pior faixa com linhas da faixa adequada, e tabela de eventos com origem do registro. 21 testes novos (`tests/test_rede.py`), incluindo o discriminador reboot×wifi.
+
 ## [Unreleased] - 2026-10-27
 
 ### Added

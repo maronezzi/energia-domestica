@@ -312,6 +312,7 @@
     <button class="tab" onclick="showTab('history')">📈 Histórico</button>
     <button class="tab" onclick="showTab('charges')">🔌 Carregamentos</button>
     <button class="tab" onclick="showTab('byd')">🚗 Carro</button>
+    <button class="tab" onclick="showTab('rede')">⚡ Rede</button>
     <button class="tab" onclick="showTab('settings')">⚙️ Config</button>
 </div>
 
@@ -904,6 +905,46 @@ carro —</div></div></div>
     </div>
 </div>
 
+<!-- ═══ REDE (apagões + analisador de tensão) ═══ -->
+<div id="tab-rede" class="tab-content">
+    <div class="summary" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">
+        <div class="sum-card"><div class="big" id="rdVoltNow">—</div><div class="lbl">Tensão agora</div><div class="sub" id="rdVoltZone">—</div></div>
+        <div class="sum-card"><div class="big" id="rdApagoes">—</div><div class="lbl" title="Vezes que a energia acabou — a placa reiniciou junto">🕯️ Apagões</div><div class="sub" id="rdApagoesSub">—</div></div>
+        <div class="sum-card"><div class="big" id="rdTotal">—</div><div class="lbl">Tempo sem energia</div><div class="sub" id="rdTotalSub">—</div></div>
+        <div class="sum-card"><div class="big" id="rdLongest">—</div><div class="lbl">Maior apagão</div><div class="sub" id="rdLongestSub">—</div></div>
+        <div class="sum-card"><div class="big" id="rdLast">—</div><div class="lbl">Última falta</div><div class="sub" id="rdLastSub">—</div></div>
+    </div>
+
+    <div class="chart-card" style="margin-bottom:1.5rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">
+            <h3 style="margin:0">📈 Analisador de Tensão — Casa (fase 1)</h3>
+            <div style="display:flex;gap:.4rem">
+                <button class="soc-preset" data-rede="7" onclick="setRedePeriod(7)">7d</button>
+                <button class="soc-preset active" data-rede="30" onclick="setRedePeriod(30)">30d</button>
+                <button class="soc-preset" data-rede="90" onclick="setRedePeriod(90)">90d</button>
+                <button class="hly-nav" onclick="loadRede()" title="Atualizar">🔄</button>
+            </div>
+        </div>
+        <div class="chart-box" style="height:250px"><canvas id="chartVolt"></canvas></div>
+        <div style="font-size:.75rem;color:var(--dim);margin-top:.6rem" id="rdBandLegend">—</div>
+    </div>
+
+    <div class="table-card">
+        <h3>🕯️ Apagões e Eventos de Tensão</h3>
+        <div class="table-wrap">
+            <table class="data-table">
+                <thead><tr><th>Início</th><th>Duração</th><th>Fim</th><th>Tipo</th><th class="num">Tensão mín</th><th class="num">Tensão máx</th><th>Registro</th></tr></thead>
+                <tbody id="outageTbody"><tr><td colspan="7" style="text-align:center;color:var(--dim);padding:2rem">Carregando...</td></tr></tbody>
+            </table>
+        </div>
+        <div style="font-size:.75rem;color:var(--dim);margin-top:.6rem">
+            🕯️ <b>Apagão</b> = a energia acabou de verdade (a placa reiniciou junto — mesma fonte). Início e fim são estimativas com precisão de ~1 min: início = última leitura com energia, fim = boot da placa.
+            ⬇⬆ <b>Tensão baixa/alta</b> = mediu tensão fora da faixa com a placa viva (rede fraca/oscilando).
+            Wi-Fi do medidor cair <b>não</b> vira apagão — sem leitura não há registro falso.
+        </div>
+    </div>
+</div>
+
 <!-- ═══ CONFIG ═══ -->
 <div id="tab-settings" class="tab-content">
     <div class="settings">
@@ -928,7 +969,7 @@ carro —</div></div></div>
 <script>
 const POLL = 3000;
 let kwhCost = 0.956, curYear, curMonth;
-let cPower, cEnergy, cDaily, cHourly;
+let cPower, cEnergy, cDaily, cHourly, cVolt;
 
 const fmt = (v, d=1) => v > 0 ? v.toFixed(d) : '—';
 const fmtR = (v) => 'R$ ' + v.toFixed(2);
@@ -941,6 +982,7 @@ function showTab(n) {
     document.getElementById('tab-' + n).classList.add('active');
     if (n === 'history') loadHistory();
     if (n === 'byd') loadByd();
+    if (n === 'rede') loadRede();
 }
 const MES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
 
@@ -2313,8 +2355,144 @@ async function saveFuel() {
     a.style.display = 'block'; setTimeout(() => a.style.display = 'none', 3000);
 }
 
+// ─── Rede: apagões + analisador de tensão ─────────────────────
+let redeDays = 30;
+
+function initVoltChart() {
+    const base = {responsive:true, maintainAspectRatio:false, animation:{duration:200},
+        plugins:{legend:{labels:{color:'#64748b', font:{size:11}}}},
+        scales:{
+            x:{ticks:{color:'#64748b', maxTicksLimit:15}, grid:{color:'rgba(255,255,255,.03)'}},
+            y:{ticks:{color:'#64748b'}, grid:{color:'rgba(255,255,255,.03)'}, suggestedMin:100, suggestedMax:140}
+        }};
+    cVolt = new Chart(document.getElementById('chartVolt'), {
+        type:'bar',
+        data:{labels:[], datasets:[
+            {label:'Mín–Máx (V)', data:[], backgroundColor:[], borderColor:'rgba(226,232,240,.35)', borderWidth:1, borderRadius:3, barPercentage:.72, order:3},
+            {label:'Média', data:[], type:'line', borderColor:'#00d4aa', borderWidth:2, pointRadius:0, tension:.3, order:2},
+            {label:'Faixa adequada inf.', data:[], type:'line', borderColor:'rgba(245,158,11,.5)', borderDash:[6,5], borderWidth:1.5, pointRadius:0, order:1},
+            {label:'Faixa adequada sup.', data:[], type:'line', borderColor:'rgba(245,158,11,.5)', borderDash:[6,5], borderWidth:1.5, pointRadius:0, order:1}
+        ]},
+        options: base
+    });
+}
+
+function setRedePeriod(d) {
+    redeDays = d;
+    document.querySelectorAll('#tab-rede .soc-preset').forEach(b =>
+        b.classList.toggle('active', b.dataset.rede === String(d)));
+    loadRede();
+}
+
+function voltZoneOf(v, q) {
+    if (v == null || !q?.bands) return null;
+    const b = q.bands;
+    const alo = b.adequada[0], ahi = b.adequada[1];
+    const plo = b.precaria[0][0], phi = b.precaria[1][1];
+    if (v >= alo && v <= ahi) return {txt:'faixa adequada (ANEEL)', color:'var(--ok)'};
+    if (v >= plo && v < alo) return {txt:'PRECARIA — abaixo da faixa', color:'var(--warn)'};
+    if (v > ahi && v <= phi) return {txt:'PRECARIA — acima da faixa', color:'var(--warn)'};
+    return {txt:'CRÍTICA — fora da faixa ANEEL', color:'var(--danger)'};
+}
+
+function renderRedeSummary(o, st, q) {
+    const f1 = st?.devices?.fase1;
+    const v = (f1?.voltage ?? null) > 0 ? f1.voltage : null;
+    const el = document.getElementById('rdVoltNow');
+    const z = voltZoneOf(v, q);
+    el.textContent = v != null ? v.toFixed(1) + ' V' : 'sem leitura';
+    el.style.color = z ? z.color : 'var(--dim)';
+    document.getElementById('rdVoltZone').textContent = z ? z.txt : '—';
+    document.getElementById('rdVoltZone').style.color = z ? z.color : 'var(--dim)';
+    const n = o.apagao_count ?? 0;
+    const eAp = document.getElementById('rdApagoes');
+    eAp.textContent = n;
+    eAp.style.color = n > 0 ? 'var(--danger)' : 'var(--ok)';
+    document.getElementById('rdApagoesSub').textContent = o.monitoring_since
+        ? 'monitorando desde ' + fmtDateTime(o.monitoring_since) : `no período (${o.days}d)`;
+    const tot = o.total_without_power_s ?? 0;
+    const eTot = document.getElementById('rdTotal');
+    eTot.textContent = tot > 0 ? fmtDuration(tot) : '0';
+    eTot.style.color = tot > 0 ? 'var(--warn)' : 'var(--ok)';
+    document.getElementById('rdTotalSub').textContent = tot > 0 ? 'soma dos apagões' : 'nenhuma falta 🎉';
+    const eLng = document.getElementById('rdLongest');
+    eLng.textContent = o.longest_apagao_s > 0 ? fmtDuration(o.longest_apagao_s) : '—';
+    eLng.style.color = o.longest_apagao_s > 0 ? 'var(--danger)' : 'var(--ok)';
+    document.getElementById('rdLongestSub').textContent = 'no período';
+    const last = o.last_apagao;
+    const eLast = document.getElementById('rdLast');
+    eLast.textContent = last ? fmtDateTime(last.start_time) : 'nenhuma 🎉';
+    eLast.style.color = last ? 'var(--warn)' : 'var(--ok)';
+    document.getElementById('rdLastSub').textContent = last
+        ? ('duração ' + (last.end_time ? fmtDuration(last.duration_s) : 'em curso')) : 'sem faltas no período';
+}
+
+function renderVoltChart(q) {
+    if (!cVolt || !q?.bands) return;
+    const days = q.days || [];
+    const alo = q.bands.adequada[0], ahi = q.bands.adequada[1];
+    const plo = q.bands.precaria[0][0], phi = q.bands.precaria[1][1];
+    const labels = days.map(d => d.day.slice(8) + '/' + d.day.slice(5, 7));
+    const colors = days.map(d =>
+        (d.min_v < plo || d.max_v > phi) ? 'rgba(239,68,68,.55)'
+        : (d.min_v < alo || d.max_v > ahi) ? 'rgba(245,158,11,.5)'
+        : 'rgba(34,197,94,.45)');
+    cVolt.data.labels = labels;
+    cVolt.data.datasets[0].data = days.map(d => [d.min_v, d.max_v]);
+    cVolt.data.datasets[0].backgroundColor = colors;
+    cVolt.data.datasets[1].data = days.map(d => d.avg_v);
+    cVolt.data.datasets[2].data = labels.map(() => alo);
+    cVolt.data.datasets[3].data = labels.map(() => ahi);
+    cVolt.update('none');
+    document.getElementById('rdBandLegend').textContent =
+        `Faixa adequada (ANEEL): ${alo}–${ahi} V · Precária: ${plo}–${alo} / ${ahi}–${phi} V · Crítica: <${plo} ou >${phi} V — barras = mín–máx do dia (verde dentro da faixa, âmbar precária, vermelha crítica), linha = média.`;
+}
+
+function fmtOutageDur(s) {
+    return s != null && s < 60 ? Math.round(s) + 's' : fmtDuration(s);
+}
+
+function renderOutageTable(o) {
+    const tb = document.getElementById('outageTbody');
+    if (!tb) return;
+    const evs = o.events || [];
+    if (!evs.length) {
+        tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:2rem">Nenhum apagão nem evento de tensão no período 🎉</td></tr>';
+        return;
+    }
+    const tipo = k => k === 'apagao' ? '<span class="badge badge-red">🕯️ Apagão</span>'
+        : k === 'subtensao' ? '<span class="badge badge-amber">⬇ Tensão baixa</span>'
+        : k === 'sobretensao' ? '<span class="badge badge-amber">⬆ Tensão alta</span>'
+        : k;
+    const reg = s => s === 'boot' ? 'boot da placa' : s === 'live' ? 'medido ao vivo' : s === 'backfill' ? 'histórico (estimado)' : s;
+    tb.innerHTML = evs.map(e => '<tr>'
+        + '<td>' + fmtDateTime(e.start_time) + '</td>'
+        + '<td><b>' + (e.end_time ? fmtOutageDur(e.duration_s) : '<span style="color:var(--danger)">em curso…</span>') + '</b></td>'
+        + '<td>' + (e.end_time ? fmtDateTime(e.end_time) : '—') + '</td>'
+        + '<td>' + tipo(e.kind) + '</td>'
+        + '<td class="num">' + (e.min_voltage != null ? e.min_voltage.toFixed(1) + ' V' : '—') + '</td>'
+        + '<td class="num">' + (e.max_voltage != null ? e.max_voltage.toFixed(1) + ' V' : '—') + '</td>'
+        + '<td style="color:var(--dim);font-size:.78rem">' + reg(e.source) + '</td>'
+        + '</tr>').join('');
+}
+
+async function loadRede() {
+    try {
+        const [o, q] = await Promise.all([
+            fetch('/api/outages?days=' + redeDays).then(r => r.json()),
+            fetch('/api/power_quality?days=' + redeDays).then(r => r.json()),
+        ]);
+        let st = null;
+        try { st = await fetch('/api/status').then(r => r.json()); } catch (e) {}
+        renderRedeSummary(o, st, q);
+        renderVoltChart(q);
+        renderOutageTable(o);
+    } catch (e) { /* best-effort */ }
+}
+
 // Init
 initCharts();
+initVoltChart();
 initBydChart();
 initBydDailyChart();
 initFuelLevelChart();
@@ -2331,6 +2509,9 @@ setInterval(() => {
 setInterval(() => {
     if (document.getElementById('tab-byd')?.classList.contains('active')) loadByd();
 }, 30000);
+setInterval(() => {
+    if (document.getElementById('tab-rede')?.classList.contains('active')) loadRede();
+}, 60000);
 // Leaflet precisa recalcular tamanho quando o container aparece/redimensiona
 window.addEventListener('resize', () => { if (bydMap) bydMap.invalidateSize(); });
 // Faster polling for the charge session (every 2s) so the countdown is smooth

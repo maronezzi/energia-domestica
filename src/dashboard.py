@@ -86,6 +86,8 @@ DEFAULT_CONFIG = {
     "car_charge_efficiency": 0.85,  # Charging efficiency (grid→battery). Tune to match car app estimate.
     "car_fuel_price": None,  # R$/L do combustível — dono informa na aba Config
     "car_tank_l": 48,  # capacidade do tanque (Song Pro DM-i ≈ 48 L) — estima litros abastecidos
+    "grid_nominal_v": 127,  # tensão nominal da casa (fase1) — faixas ANEEL derivadas dela
+    "outage_min_gap_s": 900,  # backfill: lacuna de leituras ≥ 15 min com reboot vira apagão
     "cloud_enabled": False,  # Cloud OFF by default - user decides
 }
 # 17280 leituras/dia a 5s → ~29 dias de histórico bruto antes do prune
@@ -499,6 +501,27 @@ def init_db():
             nivel_km_dia REAL, confianca REAL, status TEXT
         )
     """)
+    # ── Rede elétrica: apagões e eventos de tensão ──
+    # Apagão = placa reiniciou junto (rede caiu); subtensão/sobtensão =
+    # mediu tensão fora da faixa com a placa viva. Fonte distingue o
+    # detector: 'boot' (reinício), 'live' (medido no poll), 'backfill'
+    # (histórico, estimado).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS outages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,          -- 'apagao' | 'subtensao' | 'sobretensao'
+            start_time TEXT NOT NULL,    -- BRT ISO local
+            end_time TEXT,               -- NULL = evento em curso
+            duration_s INTEGER,
+            min_voltage REAL,
+            max_voltage REAL,
+            source TEXT NOT NULL,        -- 'boot' | 'live' | 'backfill'
+            note TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outages_start ON outages(start_time)"
+    )
     conn.commit()
     conn.close()
 
@@ -517,6 +540,286 @@ def prune_db():
         conn.close()
     except Exception as e:
         print(f"DB prune error: {e}")
+
+
+# ─── Rede elétrica: apagões e qualidade de tensão ─────────────
+# A placa morre JUNTO com a rede (mesma fonte), então o detector explora
+# isso como prova física:
+#   • rede caiu   → placa reinicia → /proc/uptime novo → APAGÃO (no startup)
+#   • wifi/medidor caiu → placa seguiu de pé → lacuna de leitura, NÃO é falta
+#   • rede fraca  → placa viva e tensão MEDIDA fora da faixa → subtensão ao vivo
+# Faixas ANEEL (Res. 1.000/2021) para 127 V: adequada 117–133, precária
+# 103–117/133–135, crítica <103/>135. Medição real da casa (3 meses):
+# 117,6–130,1 V, média 125,7 → nominal 127 V.
+
+
+_ANEEL_ZONES = {
+    # nominal: (adeq_min, adeq_max, prec_min, prec_max)
+    115: (109, 123, 97, 126),
+    127: (117, 133, 103, 135),
+    220: (202, 231, 188, 233),
+}
+
+
+def _voltage_bands(nominal_v: float):
+    """Faixas ANEEL de atendimento: (adeq_lo, adeq_hi, prec_lo, prec_hi).
+    Nominais fora da tabela escalam a faixa de 127 V."""
+    table = _ANEEL_ZONES.get(int(nominal_v))
+    if table:
+        return table
+    s = nominal_v / 127.0
+    return (
+        round(117 * s, 1),
+        round(133 * s, 1),
+        round(103 * s, 1),
+        round(135 * s, 1),
+    )
+
+
+def voltage_zone(v: float, nominal_v: float) -> str:
+    adeq_lo, adeq_hi, prec_lo, prec_hi = _voltage_bands(nominal_v)
+    if adeq_lo <= v <= adeq_hi:
+        return "adequada"
+    if prec_lo <= v < adeq_lo or adeq_hi < v <= prec_hi:
+        return "precaria"
+    return "critica"
+
+
+def board_boot_time():
+    """Epoch do boot da placa via /proc/uptime, ou None se indisponível."""
+    try:
+        with open("/proc/uptime") as f:
+            return time.time() - float(f.read().split()[0])
+    except Exception:
+        return None
+
+
+def _insert_outage(conn, kind, start, end, source="live", note=None,
+                   min_voltage=None, max_voltage=None):
+    """Grava um evento de rede, fundindo com o anterior se colado (<120s).
+
+    Micro-piscadas em sequência (rede oscilando) contam como UM incidente na
+    régua do dono — o que interessa é "ficou sem energia", não cada boot da
+    placa. Fusão só entre eventos do MESMO tipo (subtensão logo após um
+    apagão é fenômeno novo, não continuação).
+    """
+    start = start.replace(microsecond=0)
+    end = end.replace(microsecond=0)
+    prev = conn.execute(
+        "SELECT id, kind, start_time, end_time FROM outages WHERE end_time IS NOT NULL "
+        "ORDER BY end_time DESC LIMIT 1"
+    ).fetchone()
+    if (
+        prev
+        and prev[1] == kind
+        # colado no fim do anterior (<120s), não no começo
+        and (start - datetime.fromisoformat(prev[3])).total_seconds() < 120
+    ):
+        conn.execute(
+            "UPDATE outages SET end_time=?, duration_s=?, "
+            "min_voltage=COALESCE(MIN(min_voltage, ?), min_voltage, ?), "
+            "max_voltage=COALESCE(MAX(max_voltage, ?), max_voltage, ?), "
+            "source=CASE WHEN source='live' THEN source ELSE ? END "
+            "WHERE id=?",
+            (
+                end.isoformat(timespec="seconds"),
+                max(0, int((end - datetime.fromisoformat(prev[2])).total_seconds())),
+                min_voltage, min_voltage,
+                max_voltage, max_voltage,
+                source, prev[0],
+            ),
+        )
+        return
+    conn.execute(
+        "INSERT INTO outages (kind, start_time, end_time, duration_s, "
+        "min_voltage, max_voltage, source, note) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            kind, start.isoformat(timespec="seconds"),
+            end.isoformat(timespec="seconds"),
+            max(0, int((end - start).total_seconds())),
+            min_voltage, max_voltage, source, note,
+        ),
+    )
+
+
+def detect_outage_on_startup():
+    """Rodar 1× por boot do SERVIÇO (antes do primeiro poll).
+
+    Caso 1 — havia evento ao vivo aberto (a placa morreu no meio de uma
+    subtensão, ou o serviço caiu com ele aberto): fecha agora. Se a placa
+    reiniciou DEPOIS da última leitura, o evento era o próprio apagão —
+    promove o tipo e reancora o início na última leitura real.
+
+    Caso 2 — placa reiniciou depois da última leitura (lacuna >60s):
+    apagão clássico. Início = última leitura (a rede caiu entre ela e a
+    morte da placa), fim = boot da placa (a energia voltou quando ela
+    voltou — não quando o serviço leu de novo).
+
+    Reinício do serviço com a placa de pé (deploy, vigia cron) não registra
+    nada: uptime antigo prova que a rede não caiu.
+    """
+    conn = get_db()
+    try:
+        now = datetime.now()
+        boot_ts = board_boot_time()
+        boot_dt = datetime.fromtimestamp(boot_ts) if boot_ts else None
+        last_s = conn.execute(
+            "SELECT MAX(timestamp) FROM readings WHERE device='fase1'"
+        ).fetchone()[0]
+        last_dt = datetime.fromisoformat(last_s) if last_s else None
+
+        open_row = conn.execute(
+            "SELECT id, kind, start_time FROM outages WHERE end_time IS NULL "
+            "ORDER BY start_time DESC LIMIT 1"
+        ).fetchone()
+        gap_covered = False
+        if open_row:
+            ev_id, ev_kind, ev_start_s = open_row
+            ev_start = datetime.fromisoformat(ev_start_s)
+            rebooted = (
+                boot_dt is not None
+                and last_dt is not None
+                and boot_dt > ev_start
+                and last_dt < boot_dt
+            )
+            if rebooted:
+                # Era um apagão sendo acompanhado ao vivo: o início real é a
+                # última leitura com rede de pé, não o começo da subtensão.
+                ev_start = max(ev_start, last_dt)
+                end_dt, kind = boot_dt, "apagao"
+            else:
+                end_dt, kind = (last_dt or now), ev_kind
+            conn.execute(
+                "UPDATE outages SET start_time=?, end_time=?, duration_s=?, kind=? "
+                "WHERE id=?",
+                (
+                    ev_start.isoformat(timespec="seconds"),
+                    end_dt.isoformat(timespec="seconds"),
+                    max(0, int((end_dt - ev_start).total_seconds())),
+                    kind, ev_id,
+                ),
+            )
+            gap_covered = rebooted
+            print(f"⚡ Evento de rede aberto fechado no startup: {kind} → {end_dt}")
+
+        if (
+            not gap_covered
+            and last_dt is not None
+            and boot_dt is not None
+            # 60s: todo reinício da placa depois da última leitura é prova de
+            # queda (a placa não reboota sozinha) — o piso cobre só a latência
+            # do boot (~30-60s) de micro-piscadas.
+            and (boot_dt - last_dt).total_seconds() > 60
+        ):
+            _insert_outage(
+                conn, kind="apagao",
+                start=last_dt + timedelta(seconds=5),
+                end=boot_dt,
+                source="boot",
+                note="estimado: placa reiniciou (última leitura → boot)",
+            )
+            print(
+                f"⚡ Apagão detectado no startup: {last_dt:%d/%m %H:%M:%S} → "
+                f"{boot_dt:%H:%M:%S} ({(boot_dt - last_dt).total_seconds():.0f}s)"
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ detect_outage_on_startup: {e}")
+    finally:
+        conn.close()
+
+
+def _reboot_times():
+    """Instantes de boot da placa segundo o wtmp (`last -F reboot`).
+
+    None = wtmp indisponível/ilegível — nesse caso o backfill trata toda
+    lacuna grande como apagão estimado. Com wtmp, lacuna SEM reboot dentro
+    dela é wifi/medidor/serviço — não é falta de energia.
+    """
+    try:
+        import re
+        import subprocess
+
+        out = subprocess.run(
+            ["last", "-F", "reboot"],
+            capture_output=True, text=True, timeout=15,
+            env={**os.environ, "LC_ALL": "C"},
+        ).stdout
+    except Exception:
+        return None
+    boots = []
+    for ln in out.splitlines():
+        if "reboot" not in ln:
+            continue
+        dates = re.findall(
+            r"[A-Z][a-z]{2} [A-Z][a-z]{2}\s+\d{1,2} \d{2}:\d{2}:\d{2} \d{4}", ln
+        )
+        if not dates:
+            continue
+        try:
+            boots.append(datetime.strptime(dates[-1], "%a %b %d %H:%M:%S %Y"))
+        except ValueError:
+            continue
+    return boots or None
+
+
+def backfill_outages_from_readings():
+    """1× por instalação (gate `outages_backfilled`): varre lacunas de
+    leitura e registra apagão quando a placa REINICIOU dentro da lacuna
+    (wtmp). Janela útil: ≥ outage_min_gap_s (15 min) e ≤ 2 dias — ausência
+    longa (sistema desligado de propósito) não é apagão."""
+    _cfg = load_config()
+    if _cfg.get("outages_backfilled"):
+        return
+    min_gap = _cfg.get("outage_min_gap_s", 900)
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """WITH t AS (
+                   SELECT timestamp, LAG(timestamp) OVER (ORDER BY timestamp) AS prev
+                   FROM readings WHERE device='fase1'
+               )
+               SELECT prev, timestamp FROM t
+               WHERE (julianday(timestamp) - julianday(prev)) * 86400.0 >= ?
+                 AND (julianday(timestamp) - julianday(prev)) * 86400.0 <= 172800
+               ORDER BY prev""",
+            (min_gap,),
+        ).fetchall()
+        boots = _reboot_times()
+        n = 0
+        for prev_s, ts_s in rows:
+            p_dt = datetime.fromisoformat(prev_s)
+            t_dt = datetime.fromisoformat(ts_s)
+            if boots is not None:
+                in_gap = [b for b in boots if p_dt < b < t_dt]
+                if not in_gap:
+                    continue  # lacuna sem reboot = rede/serviço, não é apagão
+                end_dt = in_gap[-1]  # último boot da lacuna = restauração final
+            else:
+                end_dt = t_dt  # sem wtmp: usa a primeira leitura pós-lacuna
+            exists = conn.execute(
+                "SELECT 1 FROM outages WHERE start_time < ? "
+                "AND COALESCE(end_time, ?) > ? LIMIT 1",
+                (t_dt.isoformat(), t_dt.isoformat(), p_dt.isoformat()),
+            ).fetchone()
+            if exists:
+                continue
+            _insert_outage(
+                conn, kind="apagao",
+                start=p_dt + timedelta(seconds=5), end=end_dt,
+                source="backfill",
+                note="estimado do histórico (lacuna de leituras)",
+            )
+            n += 1
+        conn.commit()
+        _cfg["outages_backfilled"] = True
+        save_config(_cfg)
+        print(
+            f"⚡ Backfill de apagões: {n} evento(s) do histórico "
+            f"({len(rows)} lacuna(s) ≥ {min_gap}s; wtmp={'ok' if boots else 'indisponível'})"
+        )
+    finally:
+        conn.close()
 
 
 # ─── Config ────────────────────────────────────────────────────
@@ -2625,6 +2928,30 @@ def poll_loop():
     # de power×tempo.
     _backfill_snapshots_from_readings()
 
+    # ── Rede elétrica ──
+    # 1) fecha apagões que acabaram enquanto o serviço estava fora e registra
+    #    o apagão deste boot (placa reiniciou = rede caiu);
+    # 2) semeia o histórico 1× por instalação (gate outages_backfilled).
+    detect_outage_on_startup()
+    backfill_outages_from_readings()
+
+    # Watcher de tensão: subtensão/sobtensão com a placa VIVA (histérese:
+    # abre com 2 polls fora da faixa, fecha com 3 polls de volta na faixa
+    # adequada). Apagão completo a placa não enxerga — ela morre junto —
+    # e é capturado pelo detect_outage_on_startup do próximo boot.
+    _nominal_v = load_config().get("grid_nominal_v", 127)
+    _adeq_lo, _adeq_hi, _prec_lo, _prec_hi = _voltage_bands(_nominal_v)
+    volt_open_lo = _adeq_lo - 2.0  # <115 V (127 V nominal) abre subtensão
+    volt_open_hi = float(_prec_hi)  # >135 V abre sobretensão
+    volt_close_lo = _adeq_lo + 1.0
+    volt_close_hi = _adeq_hi - 1.0
+    volt_out_streak = 0
+    volt_out_kind = None
+    volt_out_min = None
+    volt_out_max = None
+    volt_good_streak = 0
+    live_event = None  # {"kind", "start", "min_v", "max_v"}
+
     while True:
         try:
             with state.lock:
@@ -2740,6 +3067,83 @@ def poll_loop():
 
             cfg = load_config()
             cfg_start_power_w = cfg.get("car_charge_start_power_w", 500)
+
+            # ── Analisador de tensão (rede fraca/alta com a placa viva) ──
+            # Só tensão MEDIDA abre evento: leitura falha (None, ex. wifi do
+            # medidor) não é falta de energia — sem a placa viva não haveria
+            # leitura nenhuma, e esse caso é o apagão pego no boot.
+            v_now = (f1 or {}).get("voltage")
+            if live_event is None:
+                if v_now is not None and v_now < volt_open_lo:
+                    volt_out_kind = "subtensao"
+                    volt_out_streak += 1
+                    volt_out_min = v_now if volt_out_min is None else min(volt_out_min, v_now)
+                    volt_out_max = v_now if volt_out_max is None else max(volt_out_max, v_now)
+                    if volt_out_streak >= 2:
+                        live_event = {
+                            "kind": volt_out_kind,
+                            "start": datetime.now(),
+                            "min_v": volt_out_min,
+                            "max_v": volt_out_max,
+                        }
+                        print(
+                            f"⚡ {volt_out_kind} iniciada ({volt_out_min:.1f}V) — "
+                            f"acompanhando"
+                        )
+                elif v_now is not None and v_now > volt_open_hi:
+                    volt_out_kind = "sobretensao"
+                    volt_out_streak += 1
+                    volt_out_min = v_now if volt_out_min is None else min(volt_out_min, v_now)
+                    volt_out_max = v_now if volt_out_max is None else max(volt_out_max, v_now)
+                    if volt_out_streak >= 2:
+                        live_event = {
+                            "kind": volt_out_kind,
+                            "start": datetime.now(),
+                            "min_v": volt_out_min,
+                            "max_v": volt_out_max,
+                        }
+                        print(
+                            f"⚡ {volt_out_kind} iniciada ({volt_out_max:.1f}V) — "
+                            f"acompanhando"
+                        )
+                else:
+                    volt_out_streak = 0
+                    volt_out_kind = None
+                    volt_out_min = None
+                    volt_out_max = None
+            else:
+                if v_now is not None:
+                    live_event["min_v"] = min(live_event["min_v"], v_now)
+                    live_event["max_v"] = max(live_event["max_v"], v_now)
+                if v_now is not None and volt_close_lo <= v_now <= volt_close_hi:
+                    volt_good_streak += 1
+                    if volt_good_streak >= 3:
+                        end_dt = datetime.now()
+                        _record = live_event
+                        live_event = None
+                        volt_good_streak = 0
+                        volt_out_streak = 0
+                        volt_out_min = None
+                        volt_out_max = None
+                        dur_s = (end_dt - _record["start"]).total_seconds()
+                        print(
+                            f"⚡ {_record['kind']} registrada: {dur_s:.0f}s "
+                            f"({_record['min_v']:.1f}–{_record['max_v']:.1f}V)"
+                        )
+                        conn_ev = get_db()
+                        try:
+                            _insert_outage(
+                                conn_ev, kind=_record["kind"],
+                                start=_record["start"], end=end_dt,
+                                source="live",
+                                min_voltage=_record["min_v"],
+                                max_voltage=_record["max_v"],
+                            )
+                            conn_ev.commit()
+                        finally:
+                            conn_ev.close()
+                else:
+                    volt_good_streak = 0
 
             # Streak de "switch=0 com potência idle": um desligamento real
             # abre o relé E corta o consumo juntos. Ruído do DPS 16 (switch=0
@@ -3244,6 +3648,126 @@ def api_hourly(date: str = None):
         raise HTTPException(status_code=400, detail="date deve ser YYYY-MM-DD")
     key = ("hourly", date)
     return _ttl_get_or_compute(key, 45, lambda: db_hourly(date))
+
+
+def _outages_payload(days: int):
+    """Lista de eventos de rede + resumo (apagões, tempo sem energia)."""
+    days = max(1, min(days, 3650))
+    since = (datetime.now() - timedelta(days=days)).isoformat()
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, kind, start_time, end_time, duration_s, min_voltage, "
+            "max_voltage, source, note FROM outages "
+            "WHERE start_time >= ? OR end_time IS NULL ORDER BY start_time DESC",
+            (since,),
+        ).fetchall()
+        first_row = conn.execute(
+            "SELECT MIN(timestamp) FROM readings WHERE device='fase1' AND timestamp >= ?",
+            (since,),
+        ).fetchone()[0]
+        apag = [
+            r for r in rows
+            if r[1] == "apagao" and (r[3] is not None or r[2] >= since)
+        ]
+        now = datetime.now()
+        total_s = 0
+        longest_s = 0
+        for _id, _kind, start_s, end_s, dur, *_ in apag:
+            d_s = dur if end_s is not None else int(
+                (now - datetime.fromisoformat(start_s)).total_seconds()
+            )
+            total_s += max(0, d_s or 0)
+            longest_s = max(longest_s, max(0, d_s or 0))
+        events = []
+        for _id, kind, start_s, end_s, dur, vmin, vmax, source, note in rows:
+            events.append({
+                "id": _id,
+                "kind": kind,
+                "start_time": start_s,
+                "end_time": end_s,
+                "duration_s": dur if end_s is not None else int(
+                    (now - datetime.fromisoformat(start_s)).total_seconds()
+                ),
+                "min_voltage": vmin,
+                "max_voltage": vmax,
+                "source": source,
+                "note": note,
+            })
+        return {
+            "days": days,
+            "monitoring_since": first_row,
+            "apagao_count": len(apag),
+            "total_without_power_s": total_s,
+            "longest_apagao_s": longest_s,
+            "last_apagao": next(
+                (e for e in events if e["kind"] == "apagao"), None
+            ),
+            "events": events,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/outages")
+def api_outages(days: int = 30):
+    return _ttl_get_or_compute(
+        ("outages", days), 20, lambda: _outages_payload(days)
+    )
+
+
+def _power_quality_payload(days: int):
+    """Analisador de tensão: min/média/máx e % do tempo em cada faixa ANEEL
+    por dia (fase 1 da casa)."""
+    days = max(1, min(days, 3650))
+    nominal = load_config().get("grid_nominal_v", 127)
+    adeq_lo, adeq_hi, prec_lo, prec_hi = _voltage_bands(nominal)
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT DATE(timestamp) AS d, COUNT(*),
+                      MIN(voltage), MAX(voltage), AVG(voltage),
+                      SUM(CASE WHEN voltage BETWEEN ? AND ? THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN (voltage >= ? AND voltage < ?)
+                                OR (voltage > ? AND voltage <= ?) THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN voltage < ? OR voltage > ? THEN 1 ELSE 0 END)
+               FROM readings
+               WHERE device='fase1' AND voltage IS NOT NULL AND DATE(timestamp) >= ?
+               GROUP BY d ORDER BY d""",
+            (adeq_lo, adeq_hi, prec_lo, adeq_lo, adeq_hi, prec_hi,
+             prec_lo, prec_hi, since),
+        ).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for d, n, vmin, vmax, vavg, n_adeq, n_prec, n_crit in rows:
+        out.append({
+            "day": d,
+            "samples": n,
+            "min_v": round(vmin, 1),
+            "max_v": round(vmax, 1),
+            "avg_v": round(vavg, 2),
+            "pct_adequada": round(100.0 * n_adeq / n, 2),
+            "pct_precaria": round(100.0 * n_prec / n, 2),
+            "pct_critica": round(100.0 * n_crit / n, 2),
+        })
+    return {
+        "nominal_v": nominal,
+        "bands": {
+            "adequada": [adeq_lo, adeq_hi],
+            "precaria": [[prec_lo, adeq_lo], [adeq_hi, prec_hi]],
+            "critica": [[None, prec_lo], [prec_hi, None]],
+        },
+        "days": out,
+    }
+
+
+@app.get("/api/power_quality")
+def api_power_quality(days: int = 30):
+    return _ttl_get_or_compute(
+        ("power_quality", days), 60, lambda: _power_quality_payload(days)
+    )
 
 
 @app.post("/api/breaker/on")
@@ -4036,6 +4560,7 @@ def api_config_update(cfg: dict = None):
         "car_charge_efficiency",
         "car_fuel_price",
         "car_tank_l",
+        "grid_nominal_v",
         "cloud_enabled",
     }
     # Tipo e faixa por chave: valor ruim salvo no config vira 500 permanente
@@ -4055,6 +4580,7 @@ def api_config_update(cfg: dict = None):
         "car_charge_efficiency": (0.5, 1.0),
         "car_fuel_price": (0.0, 100.0),
         "car_tank_l": (5.0, 200.0),
+        "grid_nominal_v": (100.0, 260.0),
     }
     CONFIG_BOOL_KEYS = {"car_charging", "car_charge_auto_stop", "cloud_enabled"}
     CONFIG_STR_KEYS = {"kwh_currency", "car_charge_start_time"}
