@@ -53,6 +53,20 @@
         .card h3{font-size:.9rem;margin-bottom:1rem;color:var(--dim);display:flex;align-items:center;gap:.4rem}
         .badge{padding:.2rem .6rem;border-radius:6px;font-size:.7rem;font-weight:600}
         .badge-blue{background:rgba(59,130,246,.15);color:var(--accent2)}
+        .badge-green{background:rgba(34,197,94,.15);color:var(--ok)}
+        .badge-amber{background:rgba(245,158,11,.15);color:var(--warn)}
+        .badge-red{background:rgba(239,68,68,.18);color:var(--danger)}
+        /* Manutenção preventiva: barra do ciclo + chips de probabilidade */
+        .mnt-track{position:relative;height:14px;background:var(--bg2);border-radius:7px;margin:.9rem 0 .35rem}
+        .mnt-win{position:absolute;top:0;bottom:0;background:rgba(245,158,11,.22)}
+        .mnt-fill{position:absolute;top:0;bottom:0;background:var(--accent);opacity:.85;border-radius:7px 0 0 7px}
+        .mnt-mark{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--dim);opacity:.8}
+        .mnt-pin{position:absolute;top:50%;width:14px;height:14px;border-radius:50%;background:#fff;border:3px solid var(--accent);transform:translate(-50%,-50%);box-shadow:0 0 0 3px rgba(0,212,170,.25)}
+        .mnt-scale{display:flex;justify-content:space-between;font-size:.7rem;color:var(--dim);margin-bottom:.6rem}
+        .mnt-chip{font-size:.78rem;padding:.3rem .6rem;border-radius:8px;background:var(--bg2);border:1px solid var(--border);font-variant-numeric:tabular-nums}
+        .mnt-chip b{font-weight:700}
+        .mnt-chip.hot{border-color:rgba(239,68,68,.5);color:var(--danger)}
+        .mnt-chip.warm{border-color:rgba(245,158,11,.5);color:var(--warn)}
 
         /* ═══ EV Charging Card ═══ */
         .ev-card{padding:1.2rem}
@@ -739,6 +753,65 @@ carro —</div></div></div>
             </div>
             <div style="color:var(--dim);font-size:.8rem;margin-top:.4rem">
                 SOC das últimas 24 h (leitura real do carro)
+            </div>
+        </div>
+
+        <div class="card" style="margin-top:1rem">
+            <h2>🔧 Manutenção Preventiva <span class="badge badge-blue" id="mntBadge">—</span></h2>
+
+            <div id="mntSemAncora" style="display:none;background:var(--bg2);border:1px dashed rgba(59,130,246,.5);border-radius:10px;padding:1rem;margin-bottom:1rem">
+                <p style="margin:.2rem 0 .6rem;font-size:.9rem">
+                    <b>Falta a âncora:</b> registre a data e o km da última manutenção
+                    para ativar a previsão. O sistema nunca infere esse ponto sozinho.
+                </p>
+            </div>
+
+            <div id="mntBody">
+                <div class="charge-summary" style="margin:.6rem 0">
+                    <div class="cs-card"><div class="cs-card-lbl">Próximo marco</div><div class="cs-card-val" id="mntMarco">—</div><div class="cs-card-lbl" id="mntMarcoSub" style="margin-top:.15rem">—</div></div>
+                    <div class="cs-card"><div class="cs-card-lbl">Data prevista (P50)</div><div class="cs-card-val" id="mntData">—</div><div class="cs-card-lbl" id="mntDataSub" style="margin-top:.15rem">—</div></div>
+                    <div class="cs-card"><div class="cs-card-lbl">Intervalo provável</div><div class="cs-card-val" id="mntFaixa">—</div><div class="cs-card-lbl" style="margin-top:.15rem">entre P10 e P90</div></div>
+                    <div class="cs-card"><div class="cs-card-lbl">Confiança</div><div class="cs-card-val" id="mntConf">—</div><div class="cs-card-lbl" id="mntConfSub" style="margin-top:.15rem">—</div></div>
+                </div>
+
+                <div class="mnt-track" role="img" aria-label="Progresso do ciclo de manutenção">
+                    <div class="mnt-win" id="mntWin"></div>
+                    <div class="mnt-fill" id="mntFill"></div>
+                    <div class="mnt-mark" id="mntM1"></div>
+                    <div class="mnt-mark" id="mntM2"></div>
+                    <div class="mnt-pin" id="mntPin"></div>
+                </div>
+                <div class="mnt-scale"><span>0 km</span><span>11.000</span><span>12.000</span><span>13.000</span></div>
+
+                <div id="mntChips" style="display:flex;flex-wrap:wrap;gap:.4rem;margin:.5rem 0 .2rem"></div>
+                <div id="mntFlag" style="display:none;color:var(--warn);font-size:.85rem;margin:.5rem 0"></div>
+                <div style="color:var(--dim);font-size:.8rem;margin:.4rem 0" id="mntMedia">—</div>
+            </div>
+
+            <div id="mntForm" style="display:none;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:1rem;margin:.6rem 0">
+                <div style="display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end">
+                    <div><div class="cs-card-lbl">Data</div><input type="date" id="mntFData" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:.45rem .6rem;font-size:.9rem"></div>
+                    <div><div class="cs-card-lbl">Odômetro (km)</div><input type="text" id="mntFKm" inputmode="decimal" size="9" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:.45rem .6rem;font-size:.9rem"></div>
+                    <div><div class="cs-card-lbl">Tipo</div><select id="mntFTipo" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:.45rem .6rem;font-size:.9rem"><option value="preventiva">preventiva</option><option value="revisao">revisão</option><option value="corretiva">corretiva</option></select></div>
+                    <div style="flex:1;min-width:140px"><div class="cs-card-lbl">Obs (opcional)</div><input type="text" id="mntFObs" maxlength="200" placeholder="óleo + filtros…" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:.45rem .6rem;font-size:.9rem"></div>
+                    <button class="btn-save" id="mntBtnSalvar">Salvar</button>
+                    <button class="btn-save" id="mntBtnCancelar" style="background:transparent;color:var(--dim);border:1px solid var(--border)">Cancelar</button>
+                </div>
+                <div id="mntFormErr" style="display:none;color:var(--danger);font-size:.85rem;margin-top:.5rem"></div>
+            </div>
+
+            <div style="margin:.6rem 0 .2rem" id="mntAcoes">
+                <button class="btn-save" id="mntBtnReg">Registrar manutenção</button>
+            </div>
+
+            <h3 style="margin:1rem 0 .4rem">Manutenções registradas</h3>
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead><tr><th>Data</th><th>Odômetro</th><th>Tipo</th><th>Obs</th></tr></thead>
+                    <tbody id="mntTbody">
+                        <tr><td colspan="4" style="text-align:center;color:var(--dim);padding:1rem">Nenhuma manutenção registrada ainda.</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
 
@@ -1720,6 +1793,7 @@ async function loadByd() {
             fetch('/api/byd/history?hours=168').then(r => r.json())
         ]);
         renderByd(st, hist.points || []);
+        loadManutencao();
         loadBydDiario();
         loadFuelData();
         loadMonthly();
@@ -1859,6 +1933,174 @@ function bydShiftDay(delta) {
 }
 
 function bydGoToday() { bydDay = null; loadBydDiario(); }
+
+// ─── Manutenção preventiva (docs/ESTUDO_PREVISAO_MANUTENCAO.md) ───
+
+const MNT_TXT = {
+    normal: '✅ Normal', aproximando: '⚠️ Aproximando da janela',
+    janela: '🟠 Dentro da janela ideal', estourado: '🚨 Tolerância excedida'
+};
+const MNT_CLS = { normal: 'badge-green', aproximando: 'badge-amber', janela: 'badge-amber', estourado: 'badge-red' };
+
+async function loadManutencao() {
+    try {
+        const r = await fetch('/api/byd/manutencao');
+        if (!r.ok) return;
+        renderManutencao(await r.json());
+    } catch (e) { /* mantém o último estado; card não deve gritar a cada falha */ }
+}
+
+function fmtKmBR(v) { return v == null ? '—' : Math.round(v).toLocaleString('pt-BR'); }
+
+function renderManutencao(d) {
+    const badge = document.getElementById('mntBadge');
+    const body = document.getElementById('mntBody');
+    const cta = document.getElementById('mntSemAncora');
+    const flag = document.getElementById('mntFlag');
+    const motivo = d.motivo_sem_previsao || '';
+
+    // histórico de eventos sempre
+    const tb = document.getElementById('mntTbody');
+    if (d.eventos && d.eventos.length) {
+        tb.innerHTML = d.eventos.map(e =>
+            `<tr><td>${fmtBR(e.data)}</td><td>${fmtKmBR(e.km)} km</td><td>${e.tipo}</td><td style="color:var(--dim)">${e.obs || '—'}</td></tr>`
+        ).join('');
+    } else {
+        tb.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--dim);padding:1rem">Nenhuma manutenção registrada ainda.</td></tr>';
+    }
+
+    flag.style.display = 'none';
+
+    if (motivo === 'sem_ancora') {
+        badge.textContent = '⚪ Sem âncora';
+        badge.className = 'badge badge-blue';
+        cta.style.display = 'block'; body.style.display = 'none';
+        document.getElementById('mntFData').value = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+        document.getElementById('mntFKm').value = d.odo_atual != null ? Math.round(d.odo_atual) : '';
+        mostrarManutencaoForm(true);
+        document.getElementById('mntMedia').textContent =
+            `Odômetro atual: ${fmtKmBR(d.odo_atual)} km · ${d.n_dias_obs} dias de coleta · ${motivo === 'sem_ancora' ? 'previsão bloqueada até registrar a última manutenção' : ''}`;
+        return;
+    }
+    cta.style.display = 'none'; body.style.display = 'block';
+    mostrarManutencaoForm(false);
+
+    if (motivo.startsWith('historico_insuficiente')) {
+        badge.textContent = '🟡 Coletando dados';
+        badge.className = 'badge badge-blue';
+        ['mntMarco', 'mntData', 'mntFaixa', 'mntConf'].forEach(id => document.getElementById(id).textContent = '—');
+        document.getElementById('mntMarcoSub').textContent = '—';
+        document.getElementById('mntDataSub').textContent = '—';
+        document.getElementById('mntConfSub').textContent = '—';
+        document.getElementById('mntChips').innerHTML = '';
+        flag.style.display = 'block';
+        flag.textContent = `Coletando odômetro: ${d.n_dias_obs} dias de dados. A primeira previsão nasce com 3 dias — começa com confiança baixa e melhora sozinha.`;
+        document.getElementById('mntMedia').textContent =
+            `Média até agora: ${d.media_km_dia} km/dia · odômetro ${fmtKmBR(d.odo_atual)} km`;
+        return;
+    }
+
+    // painel cheio
+    const p = d.previsao;
+    badge.textContent = MNT_TXT[d.status] || '—';
+    badge.className = 'badge ' + (MNT_CLS[d.status] || 'badge-blue');
+
+    const estourado = d.status === 'estourado';
+    document.getElementById('mntMarco').textContent = fmtKmBR(d.intervalo_km + (estourado ? d.intervalo_km : 0)) + ' km';
+    document.getElementById('mntMarcoSub').textContent = estourado
+        ? `próximo ciclo · atual em +${fmtKmBR(d.km_desde_ultima - d.janela_fim_km)} km além do limite`
+        : `faltam ${fmtKmBR(d.km_restantes_janela)} km para a janela`;
+
+    document.getElementById('mntData').textContent = p.data_p50 ? fmtBR(p.data_p50) : '—';
+    document.getElementById('mntDataSub').textContent =
+        `P10 ${p.data_p10 ? fmtBR(p.data_p10) : '—'} · P90 ${p.data_p90 ? fmtBR(p.data_p90) : '—'}`;
+    document.getElementById('mntFaixa').textContent =
+        p.dias_p10 != null ? `${p.dias_p10}–${p.dias_p90} dias` : '—';
+
+    const conf = d.confianca || {};
+    document.getElementById('mntConf').textContent =
+        conf.nivel === 'alta' ? 'Alta' : conf.nivel === 'baixa' ? 'Baixa' : 'Média';
+    document.getElementById('mntConf').style.color =
+        conf.nivel === 'alta' ? 'var(--ok)' : conf.nivel === 'baixa' ? 'var(--warn)' : 'var(--text)';
+    document.getElementById('mntConfSub').textContent =
+        conf.motivos && conf.motivos.length ? conf.motivos.join(' · ') : `${d.n_dias_obs} dias de dados`;
+
+    // barra do ciclo
+    const fim = d.janela_fim_km || 13000;
+    const pos = km => Math.max(0, Math.min(100, km / fim * 100)) + '%';
+    document.getElementById('mntWin').style.left = (d.janela_inicio_km / fim * 100) + '%';
+    document.getElementById('mntWin').style.width = ((fim - d.janela_inicio_km) / fim * 100) + '%';
+    document.getElementById('mntFill').style.width = pos(Math.min(d.km_desde_ultima, fim));
+    document.getElementById('mntM1').style.left = (d.janela_inicio_km / fim * 100) + '%';
+    document.getElementById('mntM2').style.left = ((d.intervalo_km) / fim * 100) + '%';
+    document.getElementById('mntPin').style.left = pos(Math.min(d.km_desde_ultima, fim));
+    document.getElementById('mntPin').style.borderColor = estourado ? 'var(--danger)' : 'var(--accent)';
+
+    // chips de probabilidade
+    const chips = [
+        { t: 'entrar na janela · 7 dias', v: p.p_janela_7d },
+        { t: '15 dias', v: p.p_janela_15d },
+        { t: '30 dias', v: p.p_janela_30d },
+        { t: 'estourar 13.000 · 30 dias', v: p.p_estouro_30d }
+    ];
+    document.getElementById('mntChips').innerHTML = chips.map(c => {
+        const cls = c.v >= 0.5 ? 'hot' : c.v >= 0.15 ? 'warm' : '';
+        return `<span class="mnt-chip ${cls}">${c.t} <b>${Math.round(c.v * 100)}%</b></span>`;
+    }).join('');
+
+    if (estourado) {
+        flag.style.display = 'block';
+        flag.textContent = '⚠️ Ciclo atual estourou a tolerância — a projeção e os chips referem-se ao PRÓXIMO ciclo.';
+    } else if (d.mudanca_padrao) {
+        flag.style.display = 'block';
+        flag.textContent = 'Padrão de uso mudou recentemente — o modelo já incorporou e o intervalo está alargado.';
+    }
+
+    document.getElementById('mntMedia').textContent =
+        `Média recente: ${d.nivel_km_dia_recente} km/dia · ${d.n_dias_obs} dias observados · odômetro ${fmtKmBR(d.odo_atual)} km`;
+}
+
+// sobe/desce o formulário de registro (usado pelo CTA e pelo botão)
+function mostrarManutencaoForm(mostrar) {
+    document.getElementById('mntForm').style.display = mostrar ? 'block' : 'none';
+    document.getElementById('mntFormErr').style.display = 'none';
+    if (!mostrar) return;
+    if (!document.getElementById('mntFData').value) {
+        document.getElementById('mntFData').value = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+    }
+}
+
+async function salvarManutencao() {
+    const err = document.getElementById('mntFormErr');
+    const data = document.getElementById('mntFData').value;
+    const km = parseFloat(String(document.getElementById('mntFKm').value).replace(',', '.'));
+    const tipo = document.getElementById('mntFTipo').value;
+    const obs = document.getElementById('mntFObs').value || '';
+    err.style.display = 'none';
+    if (!data || !(km > 0)) {
+        err.textContent = 'Preencha data e odômetro (km > 0).';
+        err.style.display = 'block';
+        return;
+    }
+    try {
+        const r = await fetch(`/api/byd/manutencao/evento?data=${encodeURIComponent(data)}&km=${km}&tipo=${encodeURIComponent(tipo)}&obs=${encodeURIComponent(obs)}`, { method: 'POST' });
+        if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            err.textContent = e.detail || 'Erro ao registrar a manutenção.';
+            err.style.display = 'block';
+            return;
+        }
+        mostrarManutencaoForm(false);
+        loadManutencao();
+    } catch (e) {
+        err.textContent = 'Erro de rede ao registrar a manutenção.';
+        err.style.display = 'block';
+    }
+}
+
+document.getElementById('mntBtnReg').addEventListener('click', () => mostrarManutencaoForm(true));
+document.getElementById('mntBtnCancelar').addEventListener('click', () => mostrarManutencaoForm(false));
+document.getElementById('mntBtnSalvar').addEventListener('click', salvarManutencao);
 
 async function loadBydDiario() {
     const day = bydCurrentDay();

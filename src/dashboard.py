@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 
 import byd_client  # poller BYD (thread própria; docs/ESTUDO_ABA_BYD.md)
+import manutencao_previsao  # previsão de manutenção (docs/ESTUDO_PREVISAO_MANUTENCAO.md)
 
 # ─── Config ────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent  # Project root (one level above src/)
@@ -478,6 +479,26 @@ def init_db():
                 f"última sessão real ({int(row[0])}%)"
             )
         save_config(_cfg)
+    # ── Manutenção preventiva (docs/ESTUDO_PREVISAO_MANUTENCAO.md) ──
+    # Âncora e histórico: entrada manual confirmada pelo dono, nunca inferida
+    # (mesma lição da âncora de SOC).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS manutencao_eventos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT NOT NULL,          -- data local (BRT) da manutenção YYYY-MM-DD
+            km REAL NOT NULL,            -- odômetro no momento
+            tipo TEXT NOT NULL DEFAULT 'preventiva',
+            obs TEXT
+        )
+    """)
+    # Auditoria de previsões (1 linha/dia no máximo) → acurácia futura (MAE)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS manutencao_previsoes (
+            ts INTEGER PRIMARY KEY,      -- dia UTC do cálculo (epoch/86400)
+            odo_km REAL, data_p50 TEXT, data_p10 TEXT, data_p90 TEXT,
+            nivel_km_dia REAL, confianca REAL, status TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -3389,6 +3410,159 @@ def api_byd_fuel_price(id: int = 0, price: float = 0):
         return {"success": False, "error": "id e price (> 0) obrigatórios"}
     ok = byd_client.set_fuel_price(id, price)
     return {"success": ok, "id": id, "price": price}
+
+
+# ─── Manutenção preventiva (docs/ESTUDO_PREVISAO_MANUTENCAO.md) ───
+
+@app.get("/api/byd/manutencao")
+def api_byd_manutencao():
+    """Previsão de manutenção: série diária de odômetro limpa + Monte Carlo.
+    Cálculo pesado para a A20 (monte carlo) → TTL 60 s com single-flight,
+    mesmo mecanismo dos agregados."""
+    return _ttl_get_or_compute("byd_manutencao", 60, _calcular_manutencao)
+
+
+def _calcular_manutencao():
+    conn = get_db()
+    try:
+        try:
+            snaps = conn.execute(
+                "SELECT ts, odo_km FROM byd_snapshots "
+                "WHERE ts >= ? ORDER BY ts",
+                (int(time.time()) - 190 * 86400,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            snaps = []  # BYD nunca habilitado: tabela nem existe ainda
+        try:
+            eventos = conn.execute(
+                "SELECT data, km, tipo, obs FROM manutencao_eventos "
+                "ORDER BY data DESC, id DESC LIMIT 24"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            eventos = []
+    finally:
+        conn.close()
+
+    pontos = manutencao_previsao.montar_serie_diaria(snaps)
+    serie = manutencao_previsao.serie_km_por_dia(pontos)
+    odo_atual = pontos[-1][1] if pontos else None
+
+    out = manutencao_previsao.prever(serie, km_desde_ultima=None)
+    if eventos and odo_atual is not None:
+        try:
+            km_ancora = float(eventos[0][1])
+        except (TypeError, ValueError):
+            km_ancora = None
+        # âncora só vale se aponta para km já percorridos pelo odômetro real
+        if km_ancora is not None and 0 < km_ancora <= odo_atual:
+            out = manutencao_previsao.prever(
+                serie, km_desde_ultima=odo_atual - km_ancora
+            )
+    out["odo_atual"] = odo_atual
+    out["eventos"] = [
+        {"data": e[0], "km": e[1], "tipo": e[2], "obs": e[3]} for e in eventos
+    ]
+    _auditar_previsao(out)
+    return out
+
+
+def _auditar_previsao(out):
+    """1 previsão/dia em manutencao_previsoes — daqui nasce a acurácia (MAE
+    das P50 realizadas). Auditoria nunca derruba a API."""
+    try:
+        prev = out.get("previsao")
+        if not prev or out.get("motivo_sem_previsao"):
+            return
+        dia_utc = int(time.time()) // 86400
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO manutencao_previsoes "
+                "(ts, odo_km, data_p50, data_p10, data_p90, nivel_km_dia, "
+                "confianca, status) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    dia_utc,
+                    out.get("odo_atual"),
+                    prev.get("data_p50"),
+                    prev.get("data_p10"),
+                    prev.get("data_p90"),
+                    out.get("nivel_km_dia_recente"),
+                    out.get("confianca", {}).get("score"),
+                    out.get("status"),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+@app.post("/api/byd/manutencao/evento")
+def api_byd_manutencao_evento(
+    data: str = "", km: float = 0, tipo: str = "preventiva", obs: str = ""
+):
+    """Registra manutenção (âncora da previsão + histórico). Validação dura:
+    400 em entrada ruim, nunca 500 (enxame de validação)."""
+    try:
+        datetime.strptime(data, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="data deve ser YYYY-MM-DD")
+    if tipo not in ("preventiva", "corretiva", "revisao"):
+        raise HTTPException(status_code=400, detail="tipo inválido")
+    if km <= 0:
+        raise HTTPException(status_code=400, detail="km deve ser > 0")
+    obs = (obs or "")[:200]
+
+    conn = get_db()
+    try:
+        try:
+            snaps = conn.execute(
+                "SELECT ts, odo_km FROM byd_snapshots "
+                "WHERE ts >= ? AND odo_km > 0 ORDER BY ts",
+                (int(time.time()) - 7 * 86400,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            snaps = []
+        ultimo_km = None
+        try:
+            row = conn.execute(
+                "SELECT km FROM manutencao_eventos "
+                "ORDER BY data DESC, id DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                ultimo_km = float(row[0])
+        except sqlite3.OperationalError:
+            pass
+    finally:
+        conn.close()
+
+    pontos = manutencao_previsao.montar_serie_diaria(snaps)
+    odo_atual = pontos[-1][1] if pontos else None
+    if odo_atual is not None and km > odo_atual:
+        raise HTTPException(
+            status_code=400,
+            detail=f"km ({km:.0f}) maior que o odômetro atual ({odo_atual:.0f})",
+        )
+    if ultimo_km is not None and km <= ultimo_km:
+        raise HTTPException(
+            status_code=400,
+            detail="km deve ser maior que a última manutenção registrada "
+            f"({ultimo_km:.0f})",
+        )
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO manutencao_eventos (data, km, tipo, obs) VALUES (?,?,?,?)",
+            (data, km, tipo, obs),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    with _ttl_lock:
+        _ttl_cache.pop("byd_manutencao", None)  # recalcular com a âncora nova
+    return {"success": True, "data": data, "km": km, "tipo": tipo}
 
 
 def _brt_month_keys(months: int) -> list[str]:
