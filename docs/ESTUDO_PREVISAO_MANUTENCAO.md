@@ -131,7 +131,7 @@ faixa aceita: intervalo 3.000–30.000 km, tolerância 0–3.000):
 | **Primeira inicialização** | n<3 dias ⇒ `historico_insuficiente` (status/marco absolutos aparecem já; probabilidades nascem com 3 dias, confiança "baixa") |
 | **Sem última manutenção registrada** | **(rev. 2)** não bloqueia nada: âncora = grade de múltiplos do intervalo no odômetro (`ancora_de_odometro`: 29.393 → ciclo 24.000, marco 36.000). O registro manual continua disponível e vence a grade quando existe |
 | **Inserção manual** | Só via `POST /api/byd/manutencao/evento` (km é validado: ≤ odo atual, > km do evento anterior) — não há outra porta de entrada |
-| **Manutenção fora do intervalo** | O modelo não julga: a âncora nova simplesmente reinicia o ciclo; o histórico mostra que atrasou (🚨 ficará visível no retrospecto) |
+| **Manutenção fora do intervalo** | **(rev. 3)** a grade não desloca: registro em 36.200 fecha o marco 36.000 e a próxima é 48.000; registro fora de qualquer janela (ex. 33.000) não consome o marco seguinte (próxima continua 36.000) |
 | **Mudança brusca de padrão** | Detector 7 d vs 21 d ⇒ flag `mudanca_padrao` no JSON + badge no painel + confiança −0,20 |
 | **Previsão de baixa confiança** | Score 0–1 com motivos legíveis no painel; intervalo P10–P90 já nasce largo porque a incerteza de parâmetro é sorteada em cada simulação |
 
@@ -502,15 +502,45 @@ def ancora_de_odometro(odo_atual, intervalo_km=INTERVALO_PADRAO):
     return odo_atual - math.floor(odo_atual / intervalo_km) * intervalo_km
 
 
-def prever(serie_km, km_desde_ultima, intervalo_km=INTERVALO_PADRAO,
+def base_de_odometro(odo_atual, intervalo_km=INTERVALO_PADRAO):
+    """Início do ciclo sem registro: o múltiplo do intervalo em que o carro
+    está (29.393 → 24.000)."""
+    if odo_atual is None or odo_atual <= 0:
+        return None
+    return math.floor(odo_atual / intervalo_km) * intervalo_km
+
+
+def ciclo_de_registro(km_registro, intervalo_km=INTERVALO_PADRAO,
+                      tolerancia_km=TOLERANCIA_PADRAO):
+    """REV. 3 do dono: a grade NUNCA desloca. A manutenção feita em 36.200
+    fecha o MARCO 36.000 (está dentro da tolerância dele) → a próxima é
+    48.000, com tolerância ±1.000 em torno do MARCO — não é soma a partir
+    do km registrado (48.200 estaria errado).
+
+    Devolve o marco SERVIDO (base do ciclo atual): o maior múltiplo do
+    intervalo cuja janela [marco − tol, marco + tol] contém o km registrado,
+    ou o último múltiplo antes dele se o registro veio fora de qualquer
+    janela (ex.: 33.000 não consome o 36.000 → próxima continua 36.000).
+    """
+    if km_registro is None or km_registro <= 0:
+        return None
+    return math.floor((km_registro + tolerancia_km) / intervalo_km) * intervalo_km
+
+
+def prever(serie_km, km_desde_ultima=None, intervalo_km=INTERVALO_PADRAO,
            tolerancia_km=TOLERANCIA_PADRAO, hoje=None, seed=SEED_PADRAO,
-           com_projecao=True, odo_atual=None):
+           com_projecao=True, odo_atual=None, ciclo_base=None):
     """Ponto de entrada. serie_km: [(date, km_dia)]. Devolve dict da API.
 
     com_projecao=False pula o cone do gráfico (fase 1 não tem gráfico; o
     cone é ~1/4 do custo e só faz sentido com o painel visual da fase 2).
-    odo_atual (quando informado) habilita os marcos ABSOLUTOS no payload
-    (proximo_marco_km = ex. 36.000) — a grade que o dono enxerga.
+
+    Posição no ciclo, por ordem de precedência:
+      - ciclo_base + odo_atual (regra da grade, rev. 3): km_desde é medido a
+        partir do MARCO servido, clampado em 0 (registro adiantado dentro da
+        janela deixa o carro "antes do próprio marco");
+      - km_desde_ultima direto (testes / chamadores antigos);
+      - nada => sem_ancora.
 
     Status e marcos são matemática instantânea e voltam SEMPRE que há
     âncora, mesmo com histórico curto; só a parte probabilística exige
@@ -526,25 +556,30 @@ def prever(serie_km, km_desde_ultima, intervalo_km=INTERVALO_PADRAO,
         "previsao": None,
         "motivo_sem_previsao": None,
     }
-    if km_desde_ultima is None:
+    if ciclo_base is not None and odo_atual is not None:
+        base = ciclo_base
+        km_desde = max(0.0, odo_atual - base)
+    elif km_desde_ultima is not None:
+        km_desde = km_desde_ultima
+        base = odo_atual - km_desde if odo_atual is not None else None
+    else:
         out["motivo_sem_previsao"] = "sem_ancora"
         return out
     hoje = hoje_dia
 
     # matemática instantânea: status e posição no ciclo (independe da série)
-    status, km_resta_j, km_resta_l = _status(km_desde_ultima, intervalo_km, tolerancia_km)
+    status, km_resta_j, km_resta_l = _status(km_desde, intervalo_km, tolerancia_km)
     out.update({
-        "km_desde_ultima": round(km_desde_ultima, 1),
+        "km_desde_ultima": round(km_desde, 1),
         "status": status,
         "janela_inicio_km": intervalo_km - tolerancia_km,
         "janela_fim_km": intervalo_km + tolerancia_km,
         "km_restantes_janela": round(max(0.0, km_resta_j), 1),
         "km_restantes_limite": round(max(0.0, km_resta_l), 1),
     })
-    if odo_atual is not None:
-        base = odo_atual - km_desde_ultima  # início do ciclo (registro ou múltiplo)
+    if base is not None and odo_atual is not None:
         marco = base + intervalo_km
-        while odo_atual >= marco:           # ciclos pulados (modo registro atrasado)
+        while odo_atual >= marco:           # ciclos pulados (registro atrasado)
             marco += intervalo_km
         out["proximo_marco_km"] = round(marco, 1)
         out["janela_inicio_abs"] = round(marco - tolerancia_km, 1)
@@ -561,7 +596,7 @@ def prever(serie_km, km_desde_ultima, intervalo_km=INTERVALO_PADRAO,
 
     dias_sem_obs = (hoje - mdl["ultimo_dia_obs"]).days
     rng = random.Random(seed)
-    sim = simular(mdl, km_desde_ultima, intervalo_km, tolerancia_km, rng)
+    sim = simular(mdl, km_desde, intervalo_km, tolerancia_km, rng)
 
     d10 = _quantil_dias(sim["dias_janela"], 0.10, sim["horizonte"])
     d50 = _quantil_dias(sim["dias_janela"], 0.50, sim["horizonte"])
@@ -584,7 +619,7 @@ def prever(serie_km, km_desde_ultima, intervalo_km=INTERVALO_PADRAO,
         },
     })
     if com_projecao:
-        out["projecao"] = _projecao_para_grafico(mdl, km_desde_ultima,
+        out["projecao"] = _projecao_para_grafico(mdl, km_desde,
                                                  intervalo_km, tolerancia_km,
                                                  hoje, rng)
     return out

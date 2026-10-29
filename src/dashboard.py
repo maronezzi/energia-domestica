@@ -3460,10 +3460,12 @@ def _calcular_manutencao():
     serie = manutencao_previsao.serie_km_por_dia(pontos)
     odo_atual = pontos[-1][1] if pontos else None
 
-    # âncora: registro do dono vence; sem registro, a grade de múltiplos
-    # (revisão do dono 28/10 — a previsão nunca fica bloqueada esperando)
+    # âncora — REV. 3 do dono: a grade NUNCA desloca. O registro consome o
+    # MARCO cuja janela contém o km registrado (36.200 fecha o 36.000 →
+    # próxima 48.000, não 48.200); sem registro, a base é o múltiplo em que
+    # o carro está. Em ambos os modos os marcos são múltiplos do intervalo.
     modo_ancora = "multiplos"
-    km_desde = None
+    ciclo_base = None
     if eventos and odo_atual is not None:
         try:
             km_ancora = float(eventos[0][1])
@@ -3471,13 +3473,13 @@ def _calcular_manutencao():
             km_ancora = None
         # registro só vale se aponta para km já percorridos pelo odômetro
         if km_ancora is not None and 0 < km_ancora <= odo_atual:
-            km_desde = odo_atual - km_ancora
+            ciclo_base = manutencao_previsao.ciclo_de_registro(km_ancora)
             modo_ancora = "registro"
-    if km_desde is None and odo_atual is not None:
-        km_desde = manutencao_previsao.ancora_de_odometro(odo_atual)
+    if ciclo_base is None and odo_atual is not None:
+        ciclo_base = manutencao_previsao.base_de_odometro(odo_atual)
 
-    out = manutencao_previsao.prever(serie, km_desde, odo_atual=odo_atual,
-                                     com_projecao=False)
+    out = manutencao_previsao.prever(serie, ciclo_base=ciclo_base,
+                                     odo_atual=odo_atual, com_projecao=False)
     out["modo_ancora"] = modo_ancora
     if odo_atual is None:
         out["motivo_sem_previsao"] = "sem_odometro"

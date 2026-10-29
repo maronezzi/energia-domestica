@@ -152,11 +152,31 @@ class TestModeloPrevisao(unittest.TestCase):
     def test_ancora_de_odometro_grade_de_multiplos(self):
         # exemplo do dono: quase 30.000 → próxima em 36.000 (12k em 12k)
         self.assertAlmostEqual(mp.ancora_de_odometro(29393.0), 5393.0)
-        self.assertAlmostEqual(mp.ancora_de_odometro(29393.0, 12000.0), 5393.0)
+        self.assertAlmostEqual(mp.base_de_odometro(29393.0), 24000.0)
         self.assertAlmostEqual(mp.ancora_de_odometro(36000.0), 0.0)
-        self.assertAlmostEqual(mp.ancora_de_odometro(5000.0), 5000.0)
         self.assertIsNone(mp.ancora_de_odometro(None))
         self.assertIsNone(mp.ancora_de_odometro(0.0))
+
+    def test_ciclo_de_registro_grade_nao_desloca(self):
+        # REV. 3 do dono: manutenção em 36.200 fecha o MARCO 36.000 →
+        # próxima em 48.000 (não 48.200 — não é soma a partir da última)
+        self.assertAlmostEqual(mp.ciclo_de_registro(36200.0), 36000.0)
+        res = mp.prever(_serie_comutador(30), ciclo_base=36000.0,
+                        odo_atual=36400.0, com_projecao=False)
+        self.assertAlmostEqual(res["proximo_marco_km"], 48000.0)
+        self.assertAlmostEqual(res["km_desde_ultima"], 400.0)
+        # adiantada DENTRO da janela consome o marco: 47.900 fecha o 48.000
+        self.assertAlmostEqual(mp.ciclo_de_registro(47900.0), 48000.0)
+        res = mp.prever(_serie_comutador(30), ciclo_base=48000.0,
+                        odo_atual=47950.0, com_projecao=False)
+        self.assertAlmostEqual(res["proximo_marco_km"], 60000.0)
+        self.assertAlmostEqual(res["km_desde_ultima"], 0.0)  # clamp: antes do marco
+        # fora de qualquer janela NÃO consome: 33.000 → próxima continua 36.000
+        self.assertAlmostEqual(mp.ciclo_de_registro(33000.0), 24000.0)
+        # limite da janela (marco − tol) já conta como serviço do marco
+        self.assertAlmostEqual(mp.ciclo_de_registro(35000.0), 36000.0)
+        self.assertIsNone(mp.ciclo_de_registro(None))
+        self.assertIsNone(mp.ciclo_de_registro(0.0))
 
     def test_marcos_absolutos_e_multiplos(self):
         # modo múltiplos: odo 29.393 → marco 36.000, janela [35.000, 37.000]
@@ -169,12 +189,18 @@ class TestModeloPrevisao(unittest.TestCase):
         self.assertAlmostEqual(res["janela_fim_abs"], 37000.0)
         self.assertIsNotNone(res["previsao"])
         self.assertNotIn("projecao", res)  # cone pulado (fase 1)
+        # mesmo resultado via ciclo_base (caminho da API)
+        res2 = mp.prever(serie, ciclo_base=24000.0, odo_atual=29393.0,
+                         com_projecao=False)
+        self.assertAlmostEqual(res2["proximo_marco_km"], 36000.0)
+        self.assertAlmostEqual(res2["km_desde_ultima"], 5393.0)
 
     def test_marcos_com_registro(self):
-        # registro em 23.500 com odo 29.393 → próximo marco 35.500
-        res = mp.prever(_serie_comutador(30), km_desde_ultima=5893.0,
+        # registro em 23.500 (dentro da janela do 24.000) fecha o 24.000 →
+        # próxima 36.000; a grade não desloca para 23.500+12.000=35.500
+        res = mp.prever(_serie_comutador(30), ciclo_base=24000.0,
                         odo_atual=29393.0, com_projecao=False)
-        self.assertAlmostEqual(res["proximo_marco_km"], 35500.0)
+        self.assertAlmostEqual(res["proximo_marco_km"], 36000.0)
 
     def test_historico_insuficiente_traz_status_e_marco(self):
         # com 2 dias: sem probabilidades, mas status/marco são instantâneos
@@ -281,9 +307,11 @@ class TestApiManutencao(unittest.TestCase):
         d = r.json()
         self.assertIsNone(d["motivo_sem_previsao"])
         self.assertIsNotNone(d["previsao"])
-        self.assertEqual(d["modo_ancora"], "registro")  # registro vence múltiplos
-        self.assertAlmostEqual(d["km_desde_ultima"], odo_fim - 42000, delta=1.0)
-        self.assertAlmostEqual(d["proximo_marco_km"], 54000.0)  # 42000 + 12000
+        self.assertEqual(d["modo_ancora"], "registro")  # registro vence grade
+        # REV. 3: 42.000 fecha o marco 36.000 (janela [35k,37k] não contém
+        # 42.000, então é serviço do ciclo 36.000) → próxima 48.000
+        self.assertAlmostEqual(d["km_desde_ultima"], odo_fim - 36000, delta=1.0)
+        self.assertAlmostEqual(d["proximo_marco_km"], 48000.0)
         self.assertEqual(len(d["eventos"]), 1)
 
         # auditoria: 1 linha em manutencao_previsoes
@@ -291,6 +319,22 @@ class TestApiManutencao(unittest.TestCase):
         n = conn.execute("SELECT COUNT(*) FROM manutencao_previsoes").fetchone()[0]
         conn.close()
         self.assertEqual(n, 1)
+
+    def test_registro_dentro_da_janela_consome_o_marco(self):
+        # caso discriminante da REV. 3: registro adiantado DENTRO da janela
+        # do 48.000 → próxima é 60.000 (a grade pura ainda diria 48.000)
+        odo_fim = self._seed_odo(dias=137, km_dia=40.0)  # ~42000 + 5480 = 47480
+        r = self.client.post(
+            "/api/byd/manutencao/evento?data=2026-10-27&km=47200&tipo=preventiva"
+        )
+        self.assertEqual(r.status_code, 200)
+        self.dash._manut_dia["dia"] = None
+        d = self.client.get("/api/byd/manutencao").json()
+        self.assertEqual(d["modo_ancora"], "registro")
+        self.assertAlmostEqual(d["proximo_marco_km"], 60000.0)
+        self.assertAlmostEqual(d["km_desde_ultima"], 0.0, delta=1.0)  # clamp
+        self.assertEqual(d["status"], "normal")
+        self.assertAlmostEqual(d["janela_inicio_abs"], 59000.0)
 
     def test_post_sem_odometro_aceita_ancora_retroativa(self):
         # sem byd_snapshots (BYD nunca coletou): valida km ≤ odo é impossível,
