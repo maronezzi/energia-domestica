@@ -3413,13 +3413,26 @@ def api_byd_fuel_price(id: int = 0, price: float = 0):
 
 
 # ─── Manutenção preventiva (docs/ESTUDO_PREVISAO_MANUTENCAO.md) ───
+# Revisão do dono 28/10: cálculo 1×/dia (odômetro muda pouco em um dia e a
+# A20 não precisa remontar Monte Carlo a cada refresh) e previsão NUNCA
+# bloqueada por registro — sem evento, os marcos são os múltiplos do
+# intervalo no odômetro (29.393 km → próxima em 36.000).
+
+_manut_dia = {"dia": None, "payload": None}
+_manut_lock = threading.Lock()
+
 
 @app.get("/api/byd/manutencao")
 def api_byd_manutencao():
-    """Previsão de manutenção: série diária de odômetro limpa + Monte Carlo.
-    Cálculo pesado para a A20 (monte carlo) → TTL 60 s com single-flight,
-    mesmo mecanismo dos agregados."""
-    return _ttl_get_or_compute("byd_manutencao", 60, _calcular_manutencao)
+    """Previsão de manutenção: 1 cálculo por dia (lazy — a primeira chamada
+    do dia paga o Monte Carlo, ~2-4 s na armv7; o resto do dia é cache).
+    Registrar evento invalida na hora (POST)."""
+    dia = int(time.time()) // 86400
+    with _manut_lock:
+        if _manut_dia["dia"] != dia or _manut_dia["payload"] is None:
+            _manut_dia["dia"] = dia
+            _manut_dia["payload"] = _calcular_manutencao()
+        return _manut_dia["payload"]
 
 
 def _calcular_manutencao():
@@ -3447,17 +3460,27 @@ def _calcular_manutencao():
     serie = manutencao_previsao.serie_km_por_dia(pontos)
     odo_atual = pontos[-1][1] if pontos else None
 
-    out = manutencao_previsao.prever(serie, km_desde_ultima=None)
+    # âncora: registro do dono vence; sem registro, a grade de múltiplos
+    # (revisão do dono 28/10 — a previsão nunca fica bloqueada esperando)
+    modo_ancora = "multiplos"
+    km_desde = None
     if eventos and odo_atual is not None:
         try:
             km_ancora = float(eventos[0][1])
         except (TypeError, ValueError):
             km_ancora = None
-        # âncora só vale se aponta para km já percorridos pelo odômetro real
+        # registro só vale se aponta para km já percorridos pelo odômetro
         if km_ancora is not None and 0 < km_ancora <= odo_atual:
-            out = manutencao_previsao.prever(
-                serie, km_desde_ultima=odo_atual - km_ancora
-            )
+            km_desde = odo_atual - km_ancora
+            modo_ancora = "registro"
+    if km_desde is None and odo_atual is not None:
+        km_desde = manutencao_previsao.ancora_de_odometro(odo_atual)
+
+    out = manutencao_previsao.prever(serie, km_desde, odo_atual=odo_atual,
+                                     com_projecao=False)
+    out["modo_ancora"] = modo_ancora
+    if odo_atual is None:
+        out["motivo_sem_previsao"] = "sem_odometro"
     out["odo_atual"] = odo_atual
     out["eventos"] = [
         {"data": e[0], "km": e[1], "tipo": e[2], "obs": e[3]} for e in eventos
@@ -3560,8 +3583,9 @@ def api_byd_manutencao_evento(
         conn.commit()
     finally:
         conn.close()
-    with _ttl_lock:
-        _ttl_cache.pop("byd_manutencao", None)  # recalcular com a âncora nova
+    with _manut_lock:
+        _manut_dia["dia"] = None       # recalcula já com a âncora/histórico novo
+        _manut_dia["payload"] = None
     return {"success": True, "data": data, "km": km, "tipo": tipo}
 
 

@@ -759,11 +759,9 @@ carro —</div></div></div>
         <div class="card" style="margin-top:1rem">
             <h2>🔧 Manutenção Preventiva <span class="badge badge-blue" id="mntBadge">—</span></h2>
 
-            <div id="mntSemAncora" style="display:none;background:var(--bg2);border:1px dashed rgba(59,130,246,.5);border-radius:10px;padding:1rem;margin-bottom:1rem">
-                <p style="margin:.2rem 0 .6rem;font-size:.9rem">
-                    <b>Falta a âncora:</b> registre a data e o km da última manutenção
-                    para ativar a previsão. O sistema nunca infere esse ponto sozinho.
-                </p>
+            <div id="mntSemOdo" style="display:none;color:var(--dim);font-size:.85rem;margin-bottom:1rem">
+                Sem odômetro coletado ainda — a previsão aparece sozinha assim que
+                o poller BYD gravar as primeiras leituras.
             </div>
 
             <div id="mntBody">
@@ -781,7 +779,7 @@ carro —</div></div></div>
                     <div class="mnt-mark" id="mntM2"></div>
                     <div class="mnt-pin" id="mntPin"></div>
                 </div>
-                <div class="mnt-scale"><span>0 km</span><span>11.000</span><span>12.000</span><span>13.000</span></div>
+                <div class="mnt-scale"><span>0 km</span><span id="mntS1">—</span><span id="mntS2">—</span><span id="mntS3">—</span></div>
 
                 <div id="mntChips" style="display:flex;flex-wrap:wrap;gap:.4rem;margin:.5rem 0 .2rem"></div>
                 <div id="mntFlag" style="display:none;color:var(--warn);font-size:.85rem;margin:.5rem 0"></div>
@@ -1955,7 +1953,7 @@ function fmtKmBR(v) { return v == null ? '—' : Math.round(v).toLocaleString('p
 function renderManutencao(d) {
     const badge = document.getElementById('mntBadge');
     const body = document.getElementById('mntBody');
-    const cta = document.getElementById('mntSemAncora');
+    const semOdo = document.getElementById('mntSemOdo');
     const flag = document.getElementById('mntFlag');
     const motivo = d.motivo_sem_previsao || '';
 
@@ -1971,32 +1969,44 @@ function renderManutencao(d) {
 
     flag.style.display = 'none';
 
-    if (motivo === 'sem_ancora') {
-        badge.textContent = '⚪ Sem âncora';
+    if (motivo === 'sem_odometro' || motivo === 'sem_ancora') {
+        badge.textContent = '⚪ Sem odômetro';
         badge.className = 'badge badge-blue';
-        cta.style.display = 'block'; body.style.display = 'none';
-        document.getElementById('mntFData').value = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
-        document.getElementById('mntFKm').value = d.odo_atual != null ? Math.round(d.odo_atual) : '';
-        mostrarManutencaoForm(true);
-        document.getElementById('mntMedia').textContent =
-            `Odômetro atual: ${fmtKmBR(d.odo_atual)} km · ${d.n_dias_obs} dias de coleta · ${motivo === 'sem_ancora' ? 'previsão bloqueada até registrar a última manutenção' : ''}`;
+        semOdo.style.display = 'block'; body.style.display = 'none';
+        mostrarManutencaoForm(false);
         return;
     }
-    cta.style.display = 'none'; body.style.display = 'block';
-    mostrarManutencaoForm(false);
+    semOdo.style.display = 'none'; body.style.display = 'block';
+
+    const estourado = d.status === 'estourado';
+    const marcoAbs = d.proximo_marco_km;   // absoluto: ex. 36.000
+    const janelaAbs = d.janela_inicio_abs;
+    const limiteAbs = d.janela_fim_abs;
+
+    // escala da barra em km absolutos (a grade do odômetro, não relativos)
+    document.getElementById('mntS1').textContent = fmtKmBR(janelaAbs);
+    document.getElementById('mntS2').textContent = fmtKmBR(marcoAbs);
+    document.getElementById('mntS3').textContent = fmtKmBR(limiteAbs);
 
     if (motivo.startsWith('historico_insuficiente')) {
         badge.textContent = '🟡 Coletando dados';
         badge.className = 'badge badge-blue';
-        ['mntMarco', 'mntData', 'mntFaixa', 'mntConf'].forEach(id => document.getElementById(id).textContent = '—');
-        document.getElementById('mntMarcoSub').textContent = '—';
+        // status/marco são instantâneos e aparecem já; só a parte
+        // probabilística espera a série
+        document.getElementById('mntMarco').textContent = fmtKmBR(marcoAbs) + ' km';
+        document.getElementById('mntMarcoSub').textContent = `faltam ${fmtKmBR(d.km_restantes_janela)} km para a janela`;
+        document.getElementById('mntData').textContent = '—';
         document.getElementById('mntDataSub').textContent = '—';
+        document.getElementById('mntFaixa').textContent = '—';
+        document.getElementById('mntConf').textContent = '—';
+        document.getElementById('mntConf').style.color = 'var(--text)';
         document.getElementById('mntConfSub').textContent = '—';
         document.getElementById('mntChips').innerHTML = '';
+        desenhaBarraManutencao(d, estourado);
         flag.style.display = 'block';
-        flag.textContent = `Coletando odômetro: ${d.n_dias_obs} dias de dados. A primeira previsão nasce com 3 dias — começa com confiança baixa e melhora sozinha.`;
+        flag.textContent = `Coletando odômetro: ${d.n_dias_obs} dias de dados. A data prevista e as probabilidades nascem com 3 dias — começam com confiança baixa e melhoram sozinhas.`;
         document.getElementById('mntMedia').textContent =
-            `Média até agora: ${d.media_km_dia} km/dia · odômetro ${fmtKmBR(d.odo_atual)} km`;
+            `Média até agora: ${d.media_km_dia} km/dia · odômetro ${fmtKmBR(d.odo_atual)} km · ${d.modo_ancora === 'registro' ? 'ciclo pelo registro do dono' : 'ciclo pelos múltiplos de ' + fmtKmBR(d.intervalo_km) + ' km'}`;
         return;
     }
 
@@ -2005,11 +2015,10 @@ function renderManutencao(d) {
     badge.textContent = MNT_TXT[d.status] || '—';
     badge.className = 'badge ' + (MNT_CLS[d.status] || 'badge-blue');
 
-    const estourado = d.status === 'estourado';
-    document.getElementById('mntMarco').textContent = fmtKmBR(d.intervalo_km + (estourado ? d.intervalo_km : 0)) + ' km';
+    document.getElementById('mntMarco').textContent = fmtKmBR(marcoAbs) + ' km';
     document.getElementById('mntMarcoSub').textContent = estourado
-        ? `próximo ciclo · atual em +${fmtKmBR(d.km_desde_ultima - d.janela_fim_km)} km além do limite`
-        : `faltam ${fmtKmBR(d.km_restantes_janela)} km para a janela`;
+        ? `atrasada: ${fmtKmBR(d.km_desde_ultima - d.janela_fim_km)} km além do limite`
+        : `faltam ${fmtKmBR(d.km_restantes_janela)} km para a janela (${fmtKmBR(janelaAbs)} km)`;
 
     document.getElementById('mntData').textContent = p.data_p50 ? fmtBR(p.data_p50) : '—';
     document.getElementById('mntDataSub').textContent =
@@ -2025,23 +2034,14 @@ function renderManutencao(d) {
     document.getElementById('mntConfSub').textContent =
         conf.motivos && conf.motivos.length ? conf.motivos.join(' · ') : `${d.n_dias_obs} dias de dados`;
 
-    // barra do ciclo
-    const fim = d.janela_fim_km || 13000;
-    const pos = km => Math.max(0, Math.min(100, km / fim * 100)) + '%';
-    document.getElementById('mntWin').style.left = (d.janela_inicio_km / fim * 100) + '%';
-    document.getElementById('mntWin').style.width = ((fim - d.janela_inicio_km) / fim * 100) + '%';
-    document.getElementById('mntFill').style.width = pos(Math.min(d.km_desde_ultima, fim));
-    document.getElementById('mntM1').style.left = (d.janela_inicio_km / fim * 100) + '%';
-    document.getElementById('mntM2').style.left = ((d.intervalo_km) / fim * 100) + '%';
-    document.getElementById('mntPin').style.left = pos(Math.min(d.km_desde_ultima, fim));
-    document.getElementById('mntPin').style.borderColor = estourado ? 'var(--danger)' : 'var(--accent)';
+    desenhaBarraManutencao(d, estourado);
 
     // chips de probabilidade
     const chips = [
         { t: 'entrar na janela · 7 dias', v: p.p_janela_7d },
         { t: '15 dias', v: p.p_janela_15d },
         { t: '30 dias', v: p.p_janela_30d },
-        { t: 'estourar 13.000 · 30 dias', v: p.p_estouro_30d }
+        { t: `estourar ${fmtKmBR(limiteAbs)} · 30 dias`, v: p.p_estouro_30d }
     ];
     document.getElementById('mntChips').innerHTML = chips.map(c => {
         const cls = c.v >= 0.5 ? 'hot' : c.v >= 0.15 ? 'warm' : '';
@@ -2050,14 +2050,27 @@ function renderManutencao(d) {
 
     if (estourado) {
         flag.style.display = 'block';
-        flag.textContent = '⚠️ Ciclo atual estourou a tolerância — a projeção e os chips referem-se ao PRÓXIMO ciclo.';
+        flag.textContent = '🚨 Manutenção atrasada — passou do limite da tolerância e ainda não há registro novo. Registre-a quando fizer.';
     } else if (d.mudanca_padrao) {
         flag.style.display = 'block';
         flag.textContent = 'Padrão de uso mudou recentemente — o modelo já incorporou e o intervalo está alargado.';
     }
 
     document.getElementById('mntMedia').textContent =
-        `Média recente: ${d.nivel_km_dia_recente} km/dia · ${d.n_dias_obs} dias observados · odômetro ${fmtKmBR(d.odo_atual)} km`;
+        `Média recente: ${d.nivel_km_dia_recente} km/dia · ${d.n_dias_obs} dias observados · odômetro ${fmtKmBR(d.odo_atual)} km · ${d.modo_ancora === 'registro' ? 'ciclo pelo registro do dono' : 'ciclo pelos múltiplos de ' + fmtKmBR(d.intervalo_km) + ' km'}`;
+}
+
+// barra do ciclo (0 → limite do ciclo atual, marcas em km absolutos)
+function desenhaBarraManutencao(d, estourado) {
+    const fim = d.janela_fim_km || 13000;
+    const pos = km => Math.max(0, Math.min(100, km / fim * 100)) + '%';
+    document.getElementById('mntWin').style.left = (d.janela_inicio_km / fim * 100) + '%';
+    document.getElementById('mntWin').style.width = ((fim - d.janela_inicio_km) / fim * 100) + '%';
+    document.getElementById('mntFill').style.width = pos(Math.min(d.km_desde_ultima, fim));
+    document.getElementById('mntM1').style.left = (d.janela_inicio_km / fim * 100) + '%';
+    document.getElementById('mntM2').style.left = (d.intervalo_km / fim * 100) + '%';
+    document.getElementById('mntPin').style.left = pos(Math.min(d.km_desde_ultima, fim));
+    document.getElementById('mntPin').style.borderColor = estourado ? 'var(--danger)' : 'var(--accent)';
 }
 
 // sobe/desce o formulário de registro (usado pelo CTA e pelo botão)

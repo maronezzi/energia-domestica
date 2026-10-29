@@ -15,7 +15,9 @@ from datetime import date, datetime, timedelta, timezone
 INTERVALO_PADRAO = 12_000.0   # km entre manutenções preventivas
 TOLERANCIA_PADRAO = 1_000.0   # janela ideal = [intervalo - tol, intervalo + tol]
 
-N_TRIALS = 3000               # simulações Monte Carlo por cálculo
+N_TRIALS = 1000               # simulações Monte Carlo por cálculo
+                              # (calibrado na armv7: 3.000 dava ~10 s; 1.000
+                              # mantém quantis estáveis a ±1.6%)
 SEED_PADRAO = 20261028        # semente fixa: mesmo dado => mesma previsão
 
 # A placa roda em UTC; o dia local do sistema é BRT fixo (padrão do repo,
@@ -212,8 +214,11 @@ def simular(mdl, km_desde_ultima, intervalo_km, tolerancia_km, rng,
     sigma = mdl["sigma"]
     for _ in range(n_trials):
         ln_mu = rng.gauss(mdl["ln_mu"], mdl["sigma_ln_mu"])
-        fat = [max(0.05, rng.gauss(w, 0.15 + 0.5 / max(1, n)))
-               for w, n in zip(mdl["fatores"], mdl["n_dow"])]
+        # log dos fatores 1x por trial (log() por dia custa caro na armv7)
+        ln_fat = [
+            math.log(max(0.05, rng.gauss(w, 0.15 + 0.5 / max(1, n))))
+            for w, n in zip(mdl["fatores"], mdl["n_dow"])
+        ]
         p0 = min(0.95, max(0.0, rng.gauss(mdl["p0"], mdl["sigma_p0"])))
         adj = -0.5 * sigma * sigma
 
@@ -225,7 +230,7 @@ def simular(mdl, km_desde_ultima, intervalo_km, tolerancia_km, rng,
             if rng.random() < p0:
                 km = 0.0
             else:
-                km = rng.lognormvariate(ln_mu + math.log(fat[dia.weekday()]) + adj, sigma)
+                km = rng.lognormvariate(ln_mu + ln_fat[dia.weekday()] + adj, sigma)
             cum += km
             if t_j is None and cum >= alvo_janela:
                 t_j = i
@@ -291,12 +296,30 @@ def _confianca(mdl, dias_sem_obs):
     return {"score": round(score, 2), "nivel": nivel, "motivos": motivos}
 
 
+def ancora_de_odometro(odo_atual, intervalo_km=INTERVALO_PADRAO):
+    """Âncora sem registro: o ciclo é a grade de múltiplos do intervalo no
+    próprio odômetro. Ex. do dono: odo 29.393 → ciclo começou em 24.000,
+    km_desde = 5.393, próximo marco 36.000 ('sempre caminha de 12.000 em
+    12.000'). Nesse modo o status nunca vira estourado: a grade avança sola.
+    """
+    if odo_atual is None or odo_atual <= 0:
+        return None
+    return odo_atual - math.floor(odo_atual / intervalo_km) * intervalo_km
+
+
 def prever(serie_km, km_desde_ultima, intervalo_km=INTERVALO_PADRAO,
-           tolerancia_km=TOLERANCIA_PADRAO, hoje=None, seed=SEED_PADRAO):
+           tolerancia_km=TOLERANCIA_PADRAO, hoje=None, seed=SEED_PADRAO,
+           com_projecao=True, odo_atual=None):
     """Ponto de entrada. serie_km: [(date, km_dia)]. Devolve dict da API.
 
-    Se km_desde_ultima é None (sem âncora) ou série insuficiente, devolve
-    previsão None com motivo — o painel mostra o estado, não inventa número.
+    com_projecao=False pula o cone do gráfico (fase 1 não tem gráfico; o
+    cone é ~1/4 do custo e só faz sentido com o painel visual da fase 2).
+    odo_atual (quando informado) habilita os marcos ABSOLUTOS no payload
+    (proximo_marco_km = ex. 36.000) — a grade que o dono enxerga.
+
+    Status e marcos são matemática instantânea e voltam SEMPRE que há
+    âncora, mesmo com histórico curto; só a parte probabilística exige
+    série (min. 3 dias) — o painel mostra o estado, não inventa número.
     """
     hoje_dia = serie_km[-1][0] if serie_km else date.today()
     out = {
@@ -309,14 +332,32 @@ def prever(serie_km, km_desde_ultima, intervalo_km=INTERVALO_PADRAO,
         "motivo_sem_previsao": None,
     }
     if km_desde_ultima is None:
-        # primeiro o bloqueador real do painel: sem âncora, o convite é
-        # registrar a manutenção — mesmo com a série ainda vazia
         out["motivo_sem_previsao"] = "sem_ancora"
         return out
+    hoje = hoje_dia
+
+    # matemática instantânea: status e posição no ciclo (independe da série)
+    status, km_resta_j, km_resta_l = _status(km_desde_ultima, intervalo_km, tolerancia_km)
+    out.update({
+        "km_desde_ultima": round(km_desde_ultima, 1),
+        "status": status,
+        "janela_inicio_km": intervalo_km - tolerancia_km,
+        "janela_fim_km": intervalo_km + tolerancia_km,
+        "km_restantes_janela": round(max(0.0, km_resta_j), 1),
+        "km_restantes_limite": round(max(0.0, km_resta_l), 1),
+    })
+    if odo_atual is not None:
+        base = odo_atual - km_desde_ultima  # início do ciclo (registro ou múltiplo)
+        marco = base + intervalo_km
+        while odo_atual >= marco:           # ciclos pulados (modo registro atrasado)
+            marco += intervalo_km
+        out["proximo_marco_km"] = round(marco, 1)
+        out["janela_inicio_abs"] = round(marco - tolerancia_km, 1)
+        out["janela_fim_abs"] = round(marco + tolerancia_km, 1)
+
     if len(serie_km) < 3:
         out["motivo_sem_previsao"] = f"historico_insuficiente ({len(serie_km)} dias; minimo 3)"
         return out
-    hoje = hoje_dia
 
     mdl = ajustar_modelo(serie_km)
     if mdl is None:
@@ -334,15 +375,7 @@ def prever(serie_km, km_desde_ultima, intervalo_km=INTERVALO_PADRAO,
     def data_de(d):
         return (hoje + timedelta(days=d)).isoformat() if d is not None else None
 
-    status, km_resta_j, km_resta_l = _status(km_desde_ultima, intervalo_km, tolerancia_km)
-
     out.update({
-        "km_desde_ultima": round(km_desde_ultima, 1),
-        "status": status,
-        "janela_inicio_km": intervalo_km - tolerancia_km,
-        "janela_fim_km": intervalo_km + tolerancia_km,
-        "km_restantes_janela": round(max(0.0, km_resta_j), 1),
-        "km_restantes_limite": round(max(0.0, km_resta_l), 1),
         "nivel_km_dia_recente": round(math.exp(mdl["ln_mu"]), 1),
         "mudanca_padrao": mdl["mudanca_padrao"],
         "confianca": _confianca(mdl, dias_sem_obs),
@@ -354,9 +387,11 @@ def prever(serie_km, km_desde_ultima, intervalo_km=INTERVALO_PADRAO,
             "p_janela_30d": round(_p_ate(sim["dias_janela"], 30), 3),
             "p_estouro_30d": round(_p_ate(sim["dias_limite"], 30), 3),
         },
-        "projecao": _projecao_para_grafico(mdl, km_desde_ultima, intervalo_km,
-                                           tolerancia_km, hoje, rng),
     })
+    if com_projecao:
+        out["projecao"] = _projecao_para_grafico(mdl, km_desde_ultima,
+                                                 intervalo_km, tolerancia_km,
+                                                 hoje, rng)
     return out
 
 

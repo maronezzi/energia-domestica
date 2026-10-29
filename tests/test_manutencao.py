@@ -149,6 +149,42 @@ class TestModeloPrevisao(unittest.TestCase):
         pontos = mp.montar_serie_diaria([(ts, 1234.5)])
         self.assertEqual(pontos[0][0].isoformat(), "2026-10-27")
 
+    def test_ancora_de_odometro_grade_de_multiplos(self):
+        # exemplo do dono: quase 30.000 → próxima em 36.000 (12k em 12k)
+        self.assertAlmostEqual(mp.ancora_de_odometro(29393.0), 5393.0)
+        self.assertAlmostEqual(mp.ancora_de_odometro(29393.0, 12000.0), 5393.0)
+        self.assertAlmostEqual(mp.ancora_de_odometro(36000.0), 0.0)
+        self.assertAlmostEqual(mp.ancora_de_odometro(5000.0), 5000.0)
+        self.assertIsNone(mp.ancora_de_odometro(None))
+        self.assertIsNone(mp.ancora_de_odometro(0.0))
+
+    def test_marcos_absolutos_e_multiplos(self):
+        # modo múltiplos: odo 29.393 → marco 36.000, janela [35.000, 37.000]
+        serie = _serie_comutador(30)
+        res = mp.prever(serie, km_desde_ultima=5393.0, odo_atual=29393.0,
+                        com_projecao=False)
+        self.assertEqual(res["status"], "normal")
+        self.assertAlmostEqual(res["proximo_marco_km"], 36000.0)
+        self.assertAlmostEqual(res["janela_inicio_abs"], 35000.0)
+        self.assertAlmostEqual(res["janela_fim_abs"], 37000.0)
+        self.assertIsNotNone(res["previsao"])
+        self.assertNotIn("projecao", res)  # cone pulado (fase 1)
+
+    def test_marcos_com_registro(self):
+        # registro em 23.500 com odo 29.393 → próximo marco 35.500
+        res = mp.prever(_serie_comutador(30), km_desde_ultima=5893.0,
+                        odo_atual=29393.0, com_projecao=False)
+        self.assertAlmostEqual(res["proximo_marco_km"], 35500.0)
+
+    def test_historico_insuficiente_traz_status_e_marco(self):
+        # com 2 dias: sem probabilidades, mas status/marco são instantâneos
+        res = mp.prever(_serie_comutador(2), km_desde_ultima=5393.0,
+                        odo_atual=29393.0, com_projecao=False)
+        self.assertIsNone(res["previsao"])
+        self.assertIn("historico_insuficiente", res["motivo_sem_previsao"])
+        self.assertEqual(res["status"], "normal")
+        self.assertAlmostEqual(res["proximo_marco_km"], 36000.0)
+
 
 class TestApiManutencao(unittest.TestCase):
     def setUp(self):
@@ -162,11 +198,15 @@ class TestApiManutencao(unittest.TestCase):
             dashboard.DB_FILE.unlink()
         dashboard.init_db()
         dashboard._ttl_cache.clear()
+        dashboard._manut_dia["dia"] = None      # cache diário é estado global:
+        dashboard._manut_dia["payload"] = None  # não pode vazar entre testes
         self.client = TestClient(dashboard.app)
 
     def tearDown(self):
         self.dash.DB_FILE = self._orig_db
         self.dash._ttl_cache.clear()
+        self.dash._manut_dia["dia"] = None
+        self.dash._manut_dia["payload"] = None
 
     def _seed_odo(self, dias=30, odo0=42000.0, km_dia=40.0):
         conn = sqlite3.connect(self.dash.DB_FILE)
@@ -185,15 +225,29 @@ class TestApiManutencao(unittest.TestCase):
         conn.close()
         return rows[-1][1]
 
-    def test_get_sem_dados_alguns(self):
+    def test_get_sem_odometro(self):
         r = self.client.get("/api/byd/manutencao")
         self.assertEqual(r.status_code, 200)
         d = r.json()
         self.assertIsNone(d["previsao"])
-        # sem série E sem âncora: o bloqueador exibido é a âncora (CTA),
-        # não o histórico — o dono precisa registrar antes de qualquer coisa
-        self.assertEqual(d["motivo_sem_previsao"], "sem_ancora")
+        self.assertEqual(d["motivo_sem_previsao"], "sem_odometro")
         self.assertIsNone(d["odo_atual"])
+
+    def test_get_modo_multiplos_previsao_imediata(self):
+        # revisão do dono 28/10: SEM registro nenhum, a previsão já vem —
+        # grade de múltiplos do intervalo no odômetro
+        odo_fim = self._seed_odo()  # 42000 + 30*40 = 43200
+        r = self.client.get("/api/byd/manutencao")
+        self.assertEqual(r.status_code, 200)
+        d = r.json()
+        self.assertIsNone(d["motivo_sem_previsao"])
+        self.assertEqual(d["modo_ancora"], "multiplos")
+        self.assertAlmostEqual(d["km_desde_ultima"], odo_fim - 36000, delta=1.0)  # 7200
+        self.assertEqual(d["status"], "normal")
+        self.assertAlmostEqual(d["proximo_marco_km"], 48000.0)
+        self.assertAlmostEqual(d["janela_inicio_abs"], 47000.0)
+        self.assertIsNotNone(d["previsao"])
+        self.assertNotIn("projecao", d)  # cone só na fase 2 (gráfico)
 
     def test_post_evento_validacao_400(self):
         for qs in (
@@ -221,13 +275,15 @@ class TestApiManutencao(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["success"])
 
-        self.dash._ttl_cache.clear()  # POST já limpa; garantia de recálculo
+        self.dash._manut_dia["dia"] = None  # POST já invalida; garantia
         r = self.client.get("/api/byd/manutencao")
         self.assertEqual(r.status_code, 200)
         d = r.json()
         self.assertIsNone(d["motivo_sem_previsao"])
         self.assertIsNotNone(d["previsao"])
+        self.assertEqual(d["modo_ancora"], "registro")  # registro vence múltiplos
         self.assertAlmostEqual(d["km_desde_ultima"], odo_fim - 42000, delta=1.0)
+        self.assertAlmostEqual(d["proximo_marco_km"], 54000.0)  # 42000 + 12000
         self.assertEqual(len(d["eventos"]), 1)
 
         # auditoria: 1 linha em manutencao_previsoes
@@ -244,7 +300,7 @@ class TestApiManutencao(unittest.TestCase):
         r = self.client.get("/api/byd/manutencao")
         self.assertEqual(r.status_code, 200)
         d = r.json()
-        self.assertEqual(d["motivo_sem_previsao"], "sem_ancora")  # sem série ainda
+        self.assertEqual(d["motivo_sem_previsao"], "sem_odometro")  # sem série
         self.assertEqual(len(d["eventos"]), 1)
 
     def test_segundo_evento_km_deve_subir(self):
