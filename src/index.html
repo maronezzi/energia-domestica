@@ -925,7 +925,7 @@ carro —</div></div></div>
                 <button class="hly-nav" onclick="loadRede()" title="Atualizar">🔄</button>
             </div>
         </div>
-        <div class="chart-box" style="height:250px"><canvas id="chartVolt"></canvas></div>
+        <div class="chart-box" style="height:300px"><canvas id="chartVolt"></canvas></div>
         <div style="font-size:.75rem;color:var(--dim);margin-top:.6rem" id="rdBandLegend">—</div>
     </div>
 
@@ -2357,23 +2357,47 @@ async function saveFuel() {
 
 // ─── Rede: apagões + analisador de tensão ─────────────────────
 let redeDays = 30;
+let voltDayData = [], voltFullDate = [], voltOutageByDay = {};
 
 function initVoltChart() {
-    const base = {responsive:true, maintainAspectRatio:false, animation:{duration:200},
-        plugins:{legend:{labels:{color:'#64748b', font:{size:11}}}},
-        scales:{
-            x:{ticks:{color:'#64748b', maxTicksLimit:15}, grid:{color:'rgba(255,255,255,.03)'}},
-            y:{ticks:{color:'#64748b'}, grid:{color:'rgba(255,255,255,.03)'}, suggestedMin:100, suggestedMax:140}
-        }};
     cVolt = new Chart(document.getElementById('chartVolt'), {
         type:'bar',
         data:{labels:[], datasets:[
-            {label:'Mín–Máx (V)', data:[], backgroundColor:[], borderColor:'rgba(226,232,240,.35)', borderWidth:1, borderRadius:3, barPercentage:.72, order:3},
+            {label:'Mín–Máx (V)', data:[], backgroundColor:[], borderColor:[], borderWidth:1.5, borderRadius:3, barPercentage:.78, order:3},
             {label:'Média', data:[], type:'line', borderColor:'#00d4aa', borderWidth:2, pointRadius:0, tension:.3, order:2},
-            {label:'Faixa adequada inf.', data:[], type:'line', borderColor:'rgba(245,158,11,.5)', borderDash:[6,5], borderWidth:1.5, pointRadius:0, order:1},
-            {label:'Faixa adequada sup.', data:[], type:'line', borderColor:'rgba(245,158,11,.5)', borderDash:[6,5], borderWidth:1.5, pointRadius:0, order:1}
+            {label:'Faixa adequada inf.', data:[], type:'line', borderColor:'rgba(245,158,11,.55)', borderDash:[6,5], borderWidth:1.5, pointRadius:0, order:1},
+            {label:'Faixa adequada sup.', data:[], type:'line', borderColor:'rgba(245,158,11,.55)', borderDash:[6,5], borderWidth:1.5, pointRadius:0, order:1}
         ]},
-        options: base
+        options:{
+            responsive:true, maintainAspectRatio:false, animation:{duration:200},
+            interaction:{mode:'index', intersect:false},
+            plugins:{
+                legend:{labels:{color:'#64748b', font:{size:11}, filter:(it) => it.datasetIndex <= 1}},
+                tooltip:{
+                    backgroundColor:'rgba(10,14,20,.95)', borderColor:'rgba(255,255,255,.12)', borderWidth:1,
+                    filter:(it) => it.datasetIndex <= 1,
+                    callbacks:{
+                        title:(items) => items.length ? 'Dia ' + (voltFullDate[items[0].dataIndex] || items[0].label) : '',
+                        label:(item) => {
+                            const d = voltDayData[item.dataIndex];
+                            if (!d) return null;
+                            return item.datasetIndex === 1
+                                ? 'Média: ' + d.avg_v.toFixed(1) + ' V'
+                                : 'Mín: ' + d.min_v.toFixed(1) + ' V · Máx: ' + d.max_v.toFixed(1) + ' V';
+                        },
+                        footer:(items) => {
+                            const day = voltDayData[items[0]?.dataIndex]?.day;
+                            const dur = voltOutageByDay[day];
+                            return dur ? '🕯️ Apagão neste dia: ' + dur : '';
+                        }
+                    }
+                }
+            },
+            scales:{
+                x:{ticks:{color:'#64748b', maxTicksLimit:16}, grid:{color:'rgba(255,255,255,.03)'}},
+                y:{ticks:{color:'#64748b', stepSize:5}, grid:{color:'rgba(255,255,255,.05)'}}
+            }
+        }
     });
 }
 
@@ -2427,25 +2451,47 @@ function renderRedeSummary(o, st, q) {
         ? ('duração ' + (last.end_time ? fmtDuration(last.duration_s) : 'em curso')) : 'sem faltas no período';
 }
 
-function renderVoltChart(q) {
+function renderVoltChart(q, o) {
     if (!cVolt || !q?.bands) return;
     const days = q.days || [];
     const alo = q.bands.adequada[0], ahi = q.bands.adequada[1];
     const plo = q.bands.precaria[0][0], phi = q.bands.precaria[1][1];
+    // Dias com apagão → borda vermelha na barra + rodapé no tooltip
+    const outSec = {};
+    (o?.events || []).forEach(e => {
+        if (e.kind !== 'apagao' || !e.start_time) return;
+        const day = e.start_time.slice(0, 10);
+        outSec[day] = (outSec[day] || 0) + (e.duration_s || 0);
+    });
+    voltOutageByDay = {};
+    Object.keys(outSec).forEach(d => { voltOutageByDay[d] = fmtDuration(outSec[d]); });
+    voltDayData = days;
+    voltFullDate = days.map(d => d.day.slice(8) + '/' + d.day.slice(5, 7) + '/' + d.day.slice(0, 4));
     const labels = days.map(d => d.day.slice(8) + '/' + d.day.slice(5, 7));
     const colors = days.map(d =>
         (d.min_v < plo || d.max_v > phi) ? 'rgba(239,68,68,.55)'
         : (d.min_v < alo || d.max_v > ahi) ? 'rgba(245,158,11,.5)'
         : 'rgba(34,197,94,.45)');
+    const borders = days.map(d => voltOutageByDay[d.day] ? 'rgba(239,68,68,.95)' : 'rgba(226,232,240,.35)');
     cVolt.data.labels = labels;
     cVolt.data.datasets[0].data = days.map(d => [d.min_v, d.max_v]);
     cVolt.data.datasets[0].backgroundColor = colors;
+    cVolt.data.datasets[0].borderColor = borders;
     cVolt.data.datasets[1].data = days.map(d => d.avg_v);
     cVolt.data.datasets[2].data = labels.map(() => alo);
     cVolt.data.datasets[3].data = labels.map(() => ahi);
+    // Eixo Y colado nos dados (min/max explícitos — suggestedMin foi
+    // ignorado pelo Chart.js): sem isso a faixa 117–133 V vira uma tirinha
+    // no topo de um eixo 0–140.
+    if (days.length) {
+        const dmin = Math.min(...days.map(d => d.min_v), alo);
+        const dmax = Math.max(...days.map(d => d.max_v), ahi);
+        cVolt.options.scales.y.min = Math.max(0, Math.floor(dmin - 3));
+        cVolt.options.scales.y.max = Math.ceil(dmax + 3);
+    }
     cVolt.update('none');
     document.getElementById('rdBandLegend').textContent =
-        `Faixa adequada (ANEEL): ${alo}–${ahi} V · Precária: ${plo}–${alo} / ${ahi}–${phi} V · Crítica: <${plo} ou >${phi} V — barras = mín–máx do dia (verde dentro da faixa, âmbar precária, vermelha crítica), linha = média.`;
+        `Faixa adequada (ANEEL): ${alo}–${ahi} V · Precária: ${plo}–${alo} / ${ahi}–${phi} V · Crítica: <${plo} ou >${phi} V — barra = mín–máx do dia (verde dentro da faixa, âmbar precária, vermelha crítica; borda vermelha = dia com apagão), linha = média.`;
 }
 
 function fmtOutageDur(s) {
@@ -2485,7 +2531,7 @@ async function loadRede() {
         let st = null;
         try { st = await fetch('/api/status').then(r => r.json()); } catch (e) {}
         renderRedeSummary(o, st, q);
-        renderVoltChart(q);
+        renderVoltChart(q, o);
         renderOutageTable(o);
     } catch (e) { /* best-effort */ }
 }

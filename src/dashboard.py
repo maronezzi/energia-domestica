@@ -3725,6 +3725,9 @@ def _power_quality_payload(days: int):
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     conn = get_db()
     try:
+        # timestamp >= ? (prefixo ISO) usa o índice (device, timestamp) e
+        # varre só a janela; DATE(timestamp) >= ? varria a tabela inteira
+        # (~10s na CubieBoard no primeiro load).
         rows = conn.execute(
             """SELECT DATE(timestamp) AS d, COUNT(*),
                       MIN(voltage), MAX(voltage), AVG(voltage),
@@ -3733,7 +3736,7 @@ def _power_quality_payload(days: int):
                                 OR (voltage > ? AND voltage <= ?) THEN 1 ELSE 0 END),
                       SUM(CASE WHEN voltage < ? OR voltage > ? THEN 1 ELSE 0 END)
                FROM readings
-               WHERE device='fase1' AND voltage IS NOT NULL AND DATE(timestamp) >= ?
+               WHERE device='fase1' AND voltage IS NOT NULL AND timestamp >= ?
                GROUP BY d ORDER BY d""",
             (adeq_lo, adeq_hi, prec_lo, adeq_lo, adeq_hi, prec_hi,
              prec_lo, prec_hi, since),
