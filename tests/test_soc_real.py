@@ -125,6 +125,74 @@ class TestSeedCarSocFromByd(unittest.TestCase):
         self.assertTrue(is_estimate)
 
 
+class TestApplyBydSoc(unittest.TestCase):
+    """Re-ancoragem do modelo de SOC no valor REAL durante a carga.
+
+    É o "acompanhamento com dado real, estimativa em segundo plano": cada
+    leitura NOVA do BYD re-ancora; leitura engavetada (mesmo data_ts) não;
+    se o dado real cair, a slope η continua sozinha do último ponto real."""
+
+    def setUp(self):
+        import dashboard
+        self.dash = dashboard
+
+    def _tracker(self, start_soc=50):
+        t = self.dash.ChargingTracker()
+        t.start(start_soc=start_soc, target_soc=80, battery_kwh=12.9,
+                start_energy_kwh=10.0)
+        return t
+
+    def test_reancora_e_slope_continua_do_real(self):
+        t = self._tracker()
+        t.update(current_energy_kwh=10.5, current_power_w=2300,
+                 idle_power_w=15, idle_seconds_needed=300, efficiency=0.85)
+        self.assertAlmostEqual(t.effective_soc, 53.3, places=1)  # estimativa η
+        self.assertEqual(t.apply_byd_soc(52.0, data_ts=1000.0), 52.0)
+        t.update(current_energy_kwh=11.0, current_power_w=2300,
+                 idle_power_w=15, idle_seconds_needed=300, efficiency=0.85)
+        # +0,5 kWh sobre a NOVA âncora (52), não sobre a partida estimada
+        self.assertAlmostEqual(t.effective_soc, 52.0 + 3.29, places=1)
+
+    def test_leitura_engavetada_nao_reancora(self):
+        t = self._tracker()
+        self.assertEqual(t.apply_byd_soc(60.0, data_ts=1000.0), 60.0)
+        # BYD engavetado (mesmo data_ts) com outro valor: ignorado
+        self.assertIsNone(t.apply_byd_soc(65.0, data_ts=1000.0))
+        self.assertEqual(t.effective_soc, 60.0)
+
+    def test_leitura_mais_nova_reancora(self):
+        t = self._tracker()
+        t.apply_byd_soc(60.0, data_ts=1000.0)
+        t.update(current_energy_kwh=10.3, current_power_w=2300,
+                 idle_power_w=15, idle_seconds_needed=300, efficiency=0.85)
+        self.assertEqual(t.apply_byd_soc(61.0, data_ts=1060.0), 61.0)
+
+    def test_sentinela_zero_e_invalidos_rejeitados(self):
+        t = self._tracker()
+        self.assertIsNone(t.apply_byd_soc(0.0, data_ts=1000.0))
+        self.assertIsNone(t.apply_byd_soc(101.0, data_ts=1000.0))
+        self.assertIsNone(t.apply_byd_soc(None, data_ts=1000.0))
+        self.assertEqual(t.effective_soc, 50.0)
+
+    def test_sem_sessao_retorna_none(self):
+        t = self.dash.ChargingTracker()
+        self.assertIsNone(t.apply_byd_soc(60.0, data_ts=1000.0))
+
+    def test_nao_marca_soc_confirmed(self):
+        """A η continua regida pela regra 10/10 — semente BYD não confirma."""
+        t = self._tracker()
+        t.apply_byd_soc(60.0, data_ts=1000.0)
+        self.assertFalse(t.soc_confirmed)
+
+    def test_fallback_quando_dado_real_cai(self):
+        t = self._tracker()
+        t.apply_byd_soc(60.0, data_ts=1000.0)
+        # BYD ficou stale — só chegou energia: slope η segue do último real
+        t.update(current_energy_kwh=10.5, current_power_w=2300,
+                 idle_power_w=15, idle_seconds_needed=300, efficiency=0.85)
+        self.assertAlmostEqual(t.effective_soc, 60.0 + 3.29, places=1)
+
+
 class TestBydSocDisplay(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient

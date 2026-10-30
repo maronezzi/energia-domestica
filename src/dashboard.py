@@ -2414,6 +2414,9 @@ class ChargingTracker:
         # âncora confiável para re-aprender a eficiência — ancorar na
         # estimativa fez a η derivar 0,937 → 0,76 (sessões 129–134).
         self.soc_confirmed = False
+        # data_ts da última leitura BYD usada para re-ancorar o modelo
+        # (apply_byd_soc): leitura repetida/velha não re-ancora.
+        self.byd_anchor_ts = None
 
     def start(
         self, start_soc, target_soc, battery_kwh, start_energy_kwh, session_uuid=None,
@@ -2440,6 +2443,7 @@ class ChargingTracker:
             self.last_active_time = None
             self.probe_phase = "none"
             self.probe_phase_since = None
+            self.byd_anchor_ts = None
 
     def stop(self, reason="manual"):
         """End the session and return to IDLE unconditionally.
@@ -2469,6 +2473,7 @@ class ChargingTracker:
             self.probe_phase = "none"
             self.probe_phase_since = None
             self.soc_confirmed = False
+            self.byd_anchor_ts = None
 
     def apply_soc_correction(self, new_soc):
         """User corrected the SOC mid-session (dashboard input).
@@ -2493,6 +2498,53 @@ class ChargingTracker:
             self.start_soc = max(0.0, min(100.0, float(new_soc)) - gained)
             self.effective_soc = max(0.0, min(100.0, float(new_soc)))
             return self.start_soc
+
+    def apply_byd_soc(self, soc_real, data_ts=None):
+        """SOC REAL do BYD durante a carga: re-ancora o modelo energético.
+
+        Recalcula start_soc para que effective_soc == soc_real AGORA,
+        preservando a slope η para interpolar entre leituras do carro — é o
+        "acompanhamento com dado real, estimativa em segundo plano": cada
+        leitura fresca do BYD re-ancora; se o dado real cair, a slope η
+        continua sozinha a partir do último ponto real (fallback suave).
+
+        Diferenças deliberadas do apply_soc_correction (input do dono):
+        • NÃO marca soc_confirmed — a η continua regida pela regra 10/10;
+        • leitura com data_ts repetido/velho é ignorada (BYD engavetado não
+          congela o modelo; só dado NOVO re-ancora);
+        • SOC 0 (sentinela) e fora de (1, 100] são rejeitados.
+        """
+        with self.lock:
+            if self.state not in (self.STATE_CHARGING, self.STATE_COMPLETING):
+                return None
+            try:
+                soc_real = float(soc_real)
+            except (TypeError, ValueError):
+                return None
+            if not (1.0 < soc_real <= 100.0):
+                return None
+            if data_ts is not None and self.byd_anchor_ts is not None:
+                if float(data_ts) <= float(self.byd_anchor_ts):
+                    return None  # leitura repetida/velha
+            prev = self.effective_soc
+            last_e = (
+                self.energy_samples[-1][1]
+                if self.energy_samples
+                else self.start_energy_kwh
+            )
+            energy_delta = max(0.0, last_e - self.start_energy_kwh)
+            gained = (
+                energy_delta * self.efficiency / max(0.1, self.battery_kwh)
+            ) * 100
+            self.start_soc = max(0.0, min(100.0, soc_real) - gained)
+            self.effective_soc = min(100.0, max(0.0, soc_real))
+            self.byd_anchor_ts = float(data_ts) if data_ts is not None else None
+            if abs(self.effective_soc - prev) > 3.0:
+                print(
+                    f"⚡ SOC real BYD re-ancorou o modelo: {prev:.1f}% → "
+                    f"{self.effective_soc:.1f}%"
+                )
+            return self.effective_soc
 
     def update(
         self, current_energy_kwh, current_power_w, idle_power_w, idle_seconds_needed,
@@ -3279,6 +3331,18 @@ def poll_loop():
                                 duration_seconds=int(max(0, elapsed)),
                                 avg_power_w=charging.session_avg_power_w,
                             )
+
+                        # ── Acompanhamento com o SOC REAL do BYD ──
+                        # Cada leitura fresca re-ancora o modelo (apply_byd_soc
+                        # ignora leitura repetida/velha); se o dado real cair,
+                        # a slope η continua sozinha do último ponto real.
+                        _bs = byd_client.status()
+                        if _bs.get("soc_fresh"):
+                            _snap_soc = _bs.get("snapshot", {}).get("soc")
+                            if _snap_soc is not None and float(_snap_soc) > 1:
+                                charging.apply_byd_soc(
+                                    _snap_soc, _bs.get("snapshot", {}).get("data_ts")
+                                )
 
                     # ── Fim de carga: concluir ou sondar retomada? ──
                     # Incidente de 2026-09-22 (sessão 126): o carro pausou aos
