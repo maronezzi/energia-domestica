@@ -940,6 +940,7 @@ carro —</div></div></div>
         <div style="font-size:.75rem;color:var(--dim);margin-top:.6rem">
             🕯️ <b>Apagão</b> = a energia acabou de verdade (a placa reiniciou junto — mesma fonte). Início e fim são estimativas com precisão de ~1 min: início = última leitura com energia, fim = boot da placa.
             ⬇⬆ <b>Tensão baixa/alta</b> = mediu tensão fora da faixa com a placa viva (rede fraca/oscilando).
+            🕳️ <b>Sem monitoramento</b> = não houve leituras e não há prova do motivo (pode ser energia, Wi-Fi ou o próprio serviço — a energia NÃO é afirmada).
             Wi-Fi do medidor cair <b>não</b> vira apagão — sem leitura não há registro falso.
         </div>
     </div>
@@ -2509,6 +2510,7 @@ function renderOutageTable(o) {
     const tipo = k => k === 'apagao' ? '<span class="badge badge-red">🕯️ Apagão</span>'
         : k === 'subtensao' ? '<span class="badge badge-amber">⬇ Tensão baixa</span>'
         : k === 'sobretensao' ? '<span class="badge badge-amber">⬆ Tensão alta</span>'
+        : k === 'lacuna' ? '<span class="badge" style="background:rgba(100,116,139,.2);color:#94a3b8">🕳️ Sem monitoramento</span>'
         : k;
     const reg = s => s === 'boot' ? 'boot da placa' : s === 'live' ? 'medido ao vivo' : s === 'backfill' ? 'histórico (estimado)' : s;
     tb.innerHTML = evs.map(e => '<tr>'

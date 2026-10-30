@@ -294,19 +294,25 @@ class TestBackfill(RedeTestCase):
             conn.close()
         self.assertEqual(rows, [])
 
-    def test_sem_wtmp_lacuna_vira_apagao_estimado(self):
+    def test_sem_wtmp_vira_lacuna_e_nao_apagao(self):
+        """Alpine não tem wtmp de boot: lacuna sem prova de reboot NUNCA é
+        apagão (o dono flagrou dois falsos — crash-loop de deploy 24/10 e
+        manobra de log 23/10). Fica como 'lacuna' e fora do resumo."""
         before, after = self._seed_gap(20)
         with patch.object(self.d, "_reboot_times", return_value=None):
             self.d.backfill_outages_from_readings()
         conn = self.d.get_db()
         try:
-            rows = conn.execute(
-                "SELECT kind, end_time FROM outages"
-            ).fetchall()
+            rows = conn.execute("SELECT kind, end_time FROM outages").fetchall()
         finally:
             conn.close()
         self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "lacuna")
         self.assertEqual(_iso(datetime.fromisoformat(rows[0][1])), _iso(after))
+        out = self.d._outages_payload(7)
+        self.assertEqual(out["apagao_count"], 0)
+        self.assertEqual(out["total_without_power_s"], 0)
+        self.assertEqual(out["events"][0]["kind"], "lacuna")
 
     def test_lacuna_grande_demais_ignorada(self):
         self._seed_gap(60 * 24 * 5)  # 5 dias = sistema desligado, não apagão

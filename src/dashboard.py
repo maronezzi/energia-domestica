@@ -765,9 +765,11 @@ def _reboot_times():
 
 def backfill_outages_from_readings():
     """1× por instalação (gate `outages_backfilled`): varre lacunas de
-    leitura e registra apagão quando a placa REINICIOU dentro da lacuna
-    (wtmp). Janela útil: ≥ outage_min_gap_s (15 min) e ≤ 2 dias — ausência
-    longa (sistema desligado de propósito) não é apagão."""
+    leitura. Com boot da placa dentro da lacuna (wtmp) → 'apagao'; wtmp ok
+    sem boot → lacuna é rede/serviço, ignora; SEM wtmp → 'lacuna' (causa
+    não registrada — NUNCA apagão sem prova). Janela útil: ≥
+    outage_min_gap_s (15 min) e ≤ 2 dias — ausência longa (sistema
+    desligado de propósito) não é evento."""
     _cfg = load_config()
     if _cfg.get("outages_backfilled"):
         return
@@ -795,8 +797,17 @@ def backfill_outages_from_readings():
                 if not in_gap:
                     continue  # lacuna sem reboot = rede/serviço, não é apagão
                 end_dt = in_gap[-1]  # último boot da lacuna = restauração final
+                kind = "apagao"
+                note = "estimado do histórico (boot da placa dentro da lacuna)"
             else:
-                end_dt = t_dt  # sem wtmp: usa a primeira leitura pós-lacuna
+                # Sem wtmp (Alpine/busybox não grava boots) não há como provar
+                # reboot — e chamar de APAGÃO provou falso: o dono flagrou dois
+                # (23 e 24/10) que eram o próprio serviço fora do ar (crash-loop
+                # de deploy e manobra de log). Vira 'lacuna': monitoramento
+                # fora do ar, causa não registrada.
+                end_dt = t_dt
+                kind = "lacuna"
+                note = "monitoramento sem leituras (causa não registrada)"
             exists = conn.execute(
                 "SELECT 1 FROM outages WHERE start_time < ? "
                 "AND COALESCE(end_time, ?) > ? LIMIT 1",
@@ -805,10 +816,9 @@ def backfill_outages_from_readings():
             if exists:
                 continue
             _insert_outage(
-                conn, kind="apagao",
+                conn, kind=kind,
                 start=p_dt + timedelta(seconds=5), end=end_dt,
-                source="backfill",
-                note="estimado do histórico (lacuna de leituras)",
+                source="backfill", note=note,
             )
             n += 1
         conn.commit()
