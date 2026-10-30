@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-29 (4)
+
+### Added
+- 📡 **Acompanhamento da carga re-ancora no SOC REAL do BYD (η em segundo plano)** — fechou o ciclo pedido pelo dono: durante a sessão, cada leitura NOVA do BYD (`data_ts` maior) passa pelo novo `ChargingTracker.apply_byd_soc()`, que recalcula o `start_soc` para o `effective_soc` valer o SOC real AGORA e mantém a slope η interpolando entre leituras (o carro anda em degraus de ~1%; a estimativa preenche o meio). **Se o dado real cair** (carro dorme, BYD fora), a slope η continua sozinha a partir do último ponto real — o fallback sem salto. Diferenças deliberadas do input do dono (`apply_soc_correction`): NÃO marca `soc_confirmed` (a η segue regida pela regra 10/10), leitura engavetada (mesmo `data_ts`) não re-ancora (BYD congelado não congela o modelo), SOC 0 (sentinela) e fora de (1,100] rejeitados. O auto-stop é power-based e não muda; o `soc_end` das sessões passa a registrar o valor real-ancorado; re-ancoragem com desvio >3% deixa rastro no log ("SOC real BYD re-ancorou o modelo: X → Y"). 8 testes novos (180 no total).
+
 ## [Unreleased] - 2026-10-29 (3)
 
 ### Added
