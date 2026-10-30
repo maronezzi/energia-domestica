@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-29 (2)
+
+### Added
+- 🔋 **SOC REAL do BYD no "Status do Carregamento" (página inicial)** — o gauge e o stat "SOC" mostravam só a estimativa η (partida + Δenergia); agora `/api/charge/state` expõe `byd_soc` quando a coleta BYD está fresca (`soc_fresh`: coleta ≤15 min, dado do carro ≤30 min) e o frontend o PREFERE: gauge com "BYD · real" no rodapé quando parado e tooltip com a origem e idade do dado ("SOC real do carro (BYD, há 1 min)"); stat "SOC · BYD (Xmin)" vs "SOC · estimado" durante a carga. Sem leitura fresca (carro dormindo/BYD fora), cai na estimativa de sempre, sem salto. SOC 0 nunca exibe (sentinela da BYD — carro dormindo); 100 real exibe (o gate 2–98 é só para âncora de partida). A estimativa η continua governando o auto-stop e a âncora do dono (campo editável) fica intocada — mudança exclusivamente de exibição. 5 testes novos (`tests/test_soc_real.py`).
+
 ## [Unreleased] - 2026-10-29
 
 ### Fixed
