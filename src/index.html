@@ -417,7 +417,7 @@ carro —</div></div></div>
             <div class="ev-stat">
                 <div class="ev-stat-icon">📈</div>
                 <div class="ev-stat-val" id="csEffectiveSoc">—</div>
-                <div class="ev-stat-unit">SOC</div>
+                <div class="ev-stat-unit" id="csEffectiveSocUnit">SOC</div>
             </div>
         </div>
 
@@ -1117,9 +1117,12 @@ function updateUI(data, td) {
     carEff = cfg.car_charge_efficiency ?? 0.85;
     const isCharging = isOn;
 
-    // Use effective SOC from charge tracker when charging, manual SOC otherwise
+    // Use real BYD SOC when fresh, tracker estimate when charging, manual SOC otherwise
     const c = lastCharge || {};
-    const soc = (c.charging && c.effective_soc != null) ? Math.round(c.effective_soc * 10) / 10 : manualSoc;
+    const bydSoc = (typeof c.byd_soc === 'number') ? c.byd_soc : null;
+    const soc = bydSoc != null ? bydSoc
+        : (c.charging && c.effective_soc != null) ? Math.round(c.effective_soc * 10) / 10
+        : manualSoc;
     const startSoc = c.charging ? (c.start_soc ?? manualSoc) : manualSoc;
 
     // Update gauge (new design)
@@ -1148,10 +1151,15 @@ function updateUI(data, td) {
     if (gaugeTarget) {
         gaugeTarget.style.strokeDashoffset = CIRC - (target / 100) * CIRC;
     }
-    if (gaugePct) gaugePct.textContent = soc.toFixed(soc % 1 === 0 ? 0 : 1) + '%';
+    if (gaugePct) {
+        gaugePct.textContent = soc.toFixed(soc % 1 === 0 ? 0 : 1) + '%';
+        gaugePct.title = bydSoc != null
+            ? ('SOC real do carro (BYD' + (c.byd_soc_age_min != null ? ', há ' + c.byd_soc_age_min + ' min' : '') + ')')
+            : 'SOC estimado pela energia entregue (sem leitura recente da BYD)';
+    }
     if (gaugeIcon) gaugeIcon.textContent = c.charging ? '⚡' : (isOn ? '🔌' : '🔋');
     if (gaugeGlow) gaugeGlow.classList.toggle('active', c.charging);
-    if (gaugeStartSoc) gaugeStartSoc.textContent = c.charging ? startSoc.toFixed(0) + '%' : '';
+    if (gaugeStartSoc) gaugeStartSoc.textContent = c.charging ? startSoc.toFixed(0) + '%' : (bydSoc != null ? 'BYD · real' : '');
     if (gaugeArrow) gaugeArrow.style.display = c.charging ? '' : 'none';
     if (gaugeTargetSoc) gaugeTargetSoc.textContent = c.charging ? target + '%' : '';
 
@@ -1247,9 +1255,17 @@ function updateChargeSession(c) {
 
     // Stats
     const startSocVal = c.start_soc ?? 0;
-    const currentSocVal = c.effective_soc ?? 0;
+    // SOC real (BYD) vence a estimativa na EXIBIÇÃO quando há leitura fresca;
+    // sem, cai na estimativa do tracker. A estimativa segue governando o
+    // auto-stop e a âncora do dono (campo editável) fica intocada.
+    const bydSoc = (typeof c.byd_soc === 'number') ? c.byd_soc : null;
+    const currentSocVal = bydSoc != null ? bydSoc : (c.effective_soc ?? 0);
     const elSoc = document.getElementById('csEffectiveSoc');
     if (elSoc) elSoc.textContent = currentSocVal.toFixed(1) + '%';
+    const elSocUnit = document.getElementById('csEffectiveSocUnit');
+    if (elSocUnit) elSocUnit.textContent = bydSoc != null
+        ? ('SOC · BYD' + (c.byd_soc_age_min != null ? ' (' + c.byd_soc_age_min + 'min)' : ''))
+        : 'SOC · estimado';
 
     const elEnergy = document.getElementById('csEnergyDelivered');
     if (elEnergy) elEnergy.textContent = (c.energy_delivered_kwh ?? 0).toFixed(2);

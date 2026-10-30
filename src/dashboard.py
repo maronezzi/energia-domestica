@@ -4439,6 +4439,21 @@ def api_car_stop_charge():
 def api_charge_state():
     """Detailed charging session state from the tracker."""
     st = charging.get_status()
+    # ── SOC REAL do carro (BYD) para EXIBIÇÃO ──
+    # soc_fresh replica o gate do fresh_soc() (coleta ≤15 min, dado do carro
+    # ≤30 min). A estimativa η do tracker continua governando o auto-stop e
+    # a âncora do dono (campo editável) fica intocada — aqui é só display.
+    # SOC 0 não exibe: é sentinela da BYD (carro dormindo, provado em 21-22/10).
+    _bs = byd_client.status()
+    if _bs.get("soc_fresh"):
+        _soc = _bs.get("snapshot", {}).get("soc")
+        if _soc is not None and float(_soc) > 1:
+            st["byd_soc"] = round(float(_soc), 1)
+            st["byd_soc_age_min"] = (
+                round(_bs["data_age_s"] / 60.0)
+                if _bs.get("data_age_s") is not None
+                else None
+            )
     if not st.get("charging"):
         # Estimativa de partida da próxima carga — aprendida do soc_start
         # reconciliado da última sessão completa (ou do último input do
