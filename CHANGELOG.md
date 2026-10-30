@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-30
+
+### Fixed
+- ⏱️ **Duas estimativas de "quanto falta" divergiam (3h19m vs 3h45m no print do dono)** — o timer "RESTANTE" usava a estimativa do SERVIDOR (potência média recente + SOC re-ancorado no real) e o "ESTIMATIVA ATÉ A META" do Controle de Carga calculava localmente com a potência INSTANTÂNEA do medidor — o carro oscila ~2,4–2,8 kW (taper/oscilação do carregador) e cada um pegava uma janela diferente. E havia um terceiro desarranjo: `updateTimer` e `updateChargeSession` escreviam o MESMO display de timer com formatos diferentes ("3h 19m" vs "3h19m"), alternando a cada ciclo de poll. Agora: `fmtRemaining()` único (e de quebra conserta a borda "1h 60m" do `round` em `mins%60`); durante a carga a ESTIMATIVA ATÉ A META mostra a MESMA estimativa do servidor — iguais por construção (provado ao vivo: ambos "3h 07m" com o carro a 2,7 kW); o cálculo local (slider + potência nominal) fica só para planejar FORA da carga.
+
 ## [Unreleased] - 2026-10-29 (4)
 
 ### Added
