@@ -3768,8 +3768,10 @@ def _power_quality_payload(days: int):
 
 @app.get("/api/power_quality")
 def api_power_quality(days: int = 30):
+    # TTL 5min: a agregação diária varre ~500k leituras quando a janela cobre
+    # o banco todo (~10s na CubieBoard); estatística de dia fechado não muda.
     return _ttl_get_or_compute(
-        ("power_quality", days), 60, lambda: _power_quality_payload(days)
+        ("power_quality", days), 300, lambda: _power_quality_payload(days)
     )
 
 
