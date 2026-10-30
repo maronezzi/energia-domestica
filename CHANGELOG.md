@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-29 (3)
+
+### Added
+- 🔁 **"SOC Atual do Carro" se auto-abastece do BYD — fim da digitação** — o campo editável do Controle de Carga mostrava o valor parado da âncora (config), que só mudava com input do dono ou no finalize; com o carro rodando, ficava cada vez errado (config dizia 9% com o carro em 63%). Agora `seed_car_soc_from_byd()` (no poll_loop) mantém a âncora em dia com o SOC REAL enquanto a coleta BYD estiver fresca, com a disciplina de proveniência intacta: grava SEMPRE `src='byd'` (nunca 'owner' — a η não pode confundir semente com input humano); src ausente (config pré-24/10) é tratado como owner; **input do dono bloqueia a semente** até o próximo finalize re-semear (`src='seed'`); SOC 0 (sentinela) não semeia; grava só com mudança ≥1%. No campo: mostra o real com borda verde e dica "⚡ BYD · real (há X min)" quando automático; digitar continua valendo e vence tudo. A ETA até a meta e o plano de carga passam a calcular do real. Efeito prático na plugada com o carro dormindo: a estimativa de partida parte do último SOC real em vez da seed antiga. 6 testes novos (173 no total).
+
 ## [Unreleased] - 2026-10-29 (2)
 
 ### Added
