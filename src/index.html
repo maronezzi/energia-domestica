@@ -1300,10 +1300,7 @@ function updateChargeSession(c) {
         } else if (c.estimated_remaining_minutes != null && c.estimated_remaining_minutes > 0) {
             timer.style.display = 'block';
             timer.classList.remove('done');
-            const m = Math.round(c.estimated_remaining_minutes);
-            const th = Math.floor(m / 60);
-            const tm = m % 60;
-            disp.textContent = th > 0 ? `${th}h${String(tm).padStart(2,'0')}m` : `${tm}min`;
+            disp.textContent = fmtRemaining(c.estimated_remaining_minutes);
         } else {
             timer.style.display = 'none';
         }
@@ -1334,6 +1331,16 @@ async function toggleAutoStop() {
     } catch(e) { console.error('toggleAutoStop', e); }
 }
 
+// Formato ÚNICO para as estimativas de tempo restante (timer "RESTANTE",
+// "ESTIMATIVA ATÉ A META" e sessão): uma fonte, um formato — antes dois
+// escritores com formatos diferentes ficavam trocando a cada ciclo.
+function fmtRemaining(mins) {
+    mins = Math.max(0, Math.round(mins || 0));
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m`;
+}
+
 function updateTimer(isCharging, powerW, targetPower, targetSoc, currentSoc, batteryKwh) {
     const timer = document.getElementById('chargeTimer');
     const disp = document.getElementById('timerDisplay');
@@ -1349,11 +1356,7 @@ function updateTimer(isCharging, powerW, targetPower, targetSoc, currentSoc, bat
             timer.classList.remove('done');
             const needKwh = Math.max(0, (targetSoc - currentSoc) / 100 * batteryKwh);
             const hours = needKwh / Math.max(0.1, (targetPower / 1000) * carEff);
-            const minsLeft = Math.max(0, Math.round(hours * 60));
-            const h = Math.floor(minsLeft / 60);
-            const m = minsLeft % 60;
-            if (h > 0) disp.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
-            else disp.textContent = `${m}min`;
+            disp.textContent = fmtRemaining(hours * 60);
         } else {
             timer.style.display = 'none';
         }
@@ -1379,16 +1382,9 @@ function updateTimer(isCharging, powerW, targetPower, targetSoc, currentSoc, bat
         const pw = powerW >= 10 ? powerW : targetPower;
         const needKwh = Math.max(0, (targetSoc - currentSoc) / 100 * batteryKwh);
         const hoursLeft = needKwh / Math.max(0.1, (pw / 1000) * carEff);
-        minsLeft = Math.max(0, Math.round(hoursLeft * 60));
+        minsLeft = Math.max(0, hoursLeft * 60);
     }
-    if (minsLeft <= 0) {
-        disp.textContent = '—';
-        return;
-    }
-    const h = Math.floor(minsLeft / 60);
-    const m = Math.round(minsLeft % 60);
-    if (h > 0) disp.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
-    else disp.textContent = `${m}m`;
+    disp.textContent = minsLeft > 0 ? fmtRemaining(minsLeft) : '—';
 }
 
 function calcAndShowPlan(soc, target, batt, power, cost) {
@@ -1448,20 +1444,25 @@ function onCurrentSocInput(val) {
     const power = parseFloat(document.getElementById('cibPower')?.textContent) || 2400;
     const etaEl = document.getElementById('socCurrentEta');
     if (!etaEl) return;
+
+    // Durante a carga: A MESMA estimativa do timer "RESTANTE" (servidor —
+    // potência média recente + SOC re-ancorado no real). O cálculo local
+    // (potência instantânea) oscilava com o carro e divergia do timer.
+    // Fora da carga: cálculo local mesmo (planejamento com slider/nominal).
+    const srv = (lastCharge && lastCharge.charging && lastCharge.estimated_remaining_minutes != null)
+        ? lastCharge.estimated_remaining_minutes : null;
+    if (srv != null) {
+        etaEl.textContent = fmtRemaining(srv);
+        etaEl.style.color = 'var(--accent)';
+        return;
+    }
     if (soc >= target) {
         etaEl.textContent = '✅ pronto';
         etaEl.style.color = 'var(--ok)';
     } else {
         const needKwh = Math.max(0, (target - soc) / 100 * batt);
         const hours = needKwh / Math.max(0.1, (power / 1000) * carEff);
-        const mins = Math.round(hours * 60);
-        if (mins < 60) {
-            etaEl.textContent = `${mins} min`;
-        } else {
-            const h = Math.floor(mins / 60);
-            const m = mins % 60;
-            etaEl.textContent = `${h}h ${String(m).padStart(2,'0')}m`;
-        }
+        etaEl.textContent = fmtRemaining(hours * 60);
         etaEl.style.color = 'var(--accent)';
     }
 }
