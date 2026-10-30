@@ -2522,6 +2522,7 @@ function renderOutageTable(o) {
         + '</tr>').join('');
 }
 
+let redeRetry = 0;
 async function loadRede() {
     try {
         const [o, q] = await Promise.all([
@@ -2533,7 +2534,12 @@ async function loadRede() {
         renderRedeSummary(o, st, q);
         renderVoltChart(q, o);
         renderOutageTable(o);
-    } catch (e) { /* best-effort */ }
+        redeRetry = 0;
+    } catch (e) {
+        // Servidor acordando (deploy/restart): tenta de novo em vez de
+        // deixar a aba vazia até o próximo refresh de 2 min.
+        if (redeRetry++ < 10) setTimeout(loadRede, 5000);
+    }
 }
 
 // Init
