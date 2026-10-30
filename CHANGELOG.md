@@ -3,6 +3,7 @@
 ## [Unreleased] - 2026-10-29
 
 ### Fixed
+- 🕳️ **Backfill chamou de APAGÃO duas quedas do próprio monitoramento** — o dono flagrou os registros de 23/10 (6h) e 24/10→25/10 (14h50m) como errados. Provas: sem wtmp no Alpine não há como provar reboot, e lacuna de leituras só prova que a COLEÇÃO caiu — no 23/10 foi a manobra de log da investigação da PSU (service.log.pregap salvo às 15:34, 9 min depois do fim da "lacuna"; havia gente operando a placa) e no 24/10 o crash-loop do processo órfão no deploy (placa de pé a noite toda, changelog de 24/10). Correção dupla: o backfill sem wtmp agora registra kind='lacuna' ("🕳️ Sem monitoramento", badge cinza, FORA do resumo de apagões — nunca afirma falta de energia sem prova) em vez de apagão; e os dois registros na placa foram reclassificados. Resumo da casa caiu de 4 apagões/24h21 para 2 apagões/3h30 (os dois de 28/10, não disputados).
 - 📊 **Gráfico de tensão ilegível** — o eixo Y ignorou o `suggestedMin` do Chart.js e nasceu em 0: a faixa real (117–133 V) virava uma tirinha de ~15% no topo. Eixo agora tem min/max EXPLÍCITOS calculados por render (dados + faixa ANEEL, ±3 V), gráfico com 300px de altura, dias com apagão ganham borda vermelha na barra + "🕯️ Apagão neste dia: Xh Ym" no tooltip (com data completa e mín/média/máx), legenda sem as linhas de faixa. Bônus: `/api/power_quality` usava `DATE(timestamp) >= ?` (varria a tabela inteira — primeiro load de ~10s na placa) e agora usa o prefixo ISO `timestamp >= ?` com índice; TTL 5min; aba auto-retenta enquanto o servidor acorda após deploy.
 
 ### Added
