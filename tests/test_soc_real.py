@@ -27,10 +27,102 @@ os.makedirs(f"{_tmpdir}/data", exist_ok=True)
 def _byd_status(soc, fresh=True, data_age_s=60):
     return {
         "soc_fresh": fresh,
-        "snapshot": {"soc": soc, "odo_km": 29350.0 if soc else None},
+        "snapshot": {"soc": soc, "odo_km": 29350.0 if soc else None,
+                     "data_ts": 1793400000.0},
         "data_age_s": data_age_s,
         "poll_age_s": 30 if fresh else None,
     }
+
+
+class TestSeedCarSocFromByd(unittest.TestCase):
+    """Semente automática da âncora car_current_soc a partir do BYD fresco.
+
+    Regras: grava só com src='byd' (nunca 'owner' — a η não pode confundir
+    com input humano); input do dono bloqueia a semente; SOC 0 é sentinela;
+    sem coleta fresca não faz nada."""
+
+    def setUp(self):
+        import dashboard
+        self.dash = dashboard
+        self._orig = (dashboard.DB_FILE, dashboard.CONFIG_FILE)
+        dashboard.DB_FILE = Path(_tmpdir) / "data" / f"db_{id(self)}.db"
+        dashboard.CONFIG_FILE = Path(_tmpdir) / "data" / f"cfg_{id(self)}.json"
+        for f in (dashboard.DB_FILE, dashboard.CONFIG_FILE):
+            if f.exists():
+                f.unlink()
+        dashboard.init_db()
+        dashboard._cfg_cache = None
+
+    def tearDown(self):
+        self.dash.DB_FILE, self.dash.CONFIG_FILE = self._orig
+        self.dash._cfg_cache = None
+
+    def _cfg_on_disk(self):
+        import json
+        return json.loads(self.dash.CONFIG_FILE.read_text())
+
+    def test_semeia_soc_real_com_src_byd(self):
+        cfg = {"car_current_soc": 10, "car_current_soc_src": "seed"}
+        self.dash.save_config(cfg)
+        with patch.object(self.dash.byd_client, "status",
+                          return_value=_byd_status(63.4)):
+            self.dash.seed_car_soc_from_byd()
+        on_disk = self._cfg_on_disk()
+        self.assertEqual(on_disk["car_current_soc"], 63)
+        self.assertEqual(on_disk["car_current_soc_src"], "byd")
+        self.assertIn("car_current_soc_ts", on_disk)
+
+    def test_input_do_dono_bloqueia_a_semente(self):
+        cfg = {"car_current_soc": 40, "car_current_soc_src": "owner",
+               "car_current_soc_ts": "2026-10-29T10:00:00"}
+        self.dash.save_config(cfg)
+        with patch.object(self.dash.byd_client, "status",
+                          return_value=_byd_status(63.4)):
+            self.dash.seed_car_soc_from_byd()
+        on_disk = self._cfg_on_disk()
+        self.assertEqual(on_disk["car_current_soc"], 40)
+        self.assertEqual(on_disk["car_current_soc_src"], "owner")
+
+    def test_sentinela_zero_nao_semeia(self):
+        cfg = {"car_current_soc": 40, "car_current_soc_src": "seed"}
+        self.dash.save_config(cfg)
+        with patch.object(self.dash.byd_client, "status",
+                          return_value=_byd_status(0.0)):
+            self.dash.seed_car_soc_from_byd()
+        on_disk = self._cfg_on_disk()
+        self.assertEqual(on_disk["car_current_soc"], 40)
+
+    def test_sem_coleta_fresca_nao_semeia(self):
+        cfg = {"car_current_soc": 40, "car_current_soc_src": "seed"}
+        self.dash.save_config(cfg)
+        with patch.object(self.dash.byd_client, "status",
+                          return_value=_byd_status(63.4, fresh=False)):
+            self.dash.seed_car_soc_from_byd()
+        on_disk = self._cfg_on_disk()
+        self.assertEqual(on_disk["car_current_soc"], 40)
+
+    def test_mudanca_pequena_nao_reescreve(self):
+        cfg = {"car_current_soc": 63, "car_current_soc_src": "byd",
+               "car_current_soc_ts": "2026-10-29T09:00:00"}
+        self.dash.save_config(cfg)
+        with patch.object(self.dash.byd_client, "status",
+                          return_value=_byd_status(63.4)):
+            self.dash.seed_car_soc_from_byd()
+        on_disk = self._cfg_on_disk()
+        self.assertEqual(on_disk["car_current_soc_ts"], "2026-10-29T09:00:00")
+
+    def test_semente_byd_nao_conta_como_owner_na_estimativa(self):
+        """A semente 'byd' NÃO pode virar partida confirmada pelo dono (η)."""
+        cfg = {"car_current_soc": 63, "car_current_soc_src": "byd",
+               "car_current_soc_ts": "2026-10-29T09:00:00"}
+        self.dash.save_config(cfg)
+        self.dash._cfg_cache = None
+        with patch.object(self.dash.byd_client, "fresh_soc", return_value=None):
+            soc, is_estimate = self.dash.estimate_car_soc_start(
+                self.dash.load_config())
+        # sem histórico e sem BYD fresco: valor da semente volta como
+        # ESTIMATIVA (não como input do dono)
+        self.assertTrue(is_estimate)
 
 
 class TestBydSocDisplay(unittest.TestCase):

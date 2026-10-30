@@ -1169,12 +1169,16 @@ function updateUI(data, td) {
     const evTargetDisplay = document.getElementById('evTargetDisplay');
     if (evTargetDisplay) evTargetDisplay.textContent = target + '%';
 
-    // SOC atual input sync
+    // SOC atual input sync: com BYD fresco o campo mostra o SOC REAL do
+    // carro (borda verde = automático, sem digitar); sem, a âncora do config.
+    // Digitar continua valendo — vira âncora do dono e vence tudo (src owner).
+    const socShown = bydSoc != null ? bydSoc : manualSoc;
     const socCurrentInput = document.getElementById('socCurrent');
     if (socCurrentInput && document.activeElement !== socCurrentInput) {
-        socCurrentInput.value = manualSoc;
+        socCurrentInput.value = Math.round(socShown * 10) / 10;
+        socCurrentInput.style.borderColor = bydSoc != null ? 'rgba(0,212,170,.5)' : '';
     }
-    onCurrentSocInput(manualSoc);
+    onCurrentSocInput(socShown);
 
     // Quick targets
     document.querySelectorAll('.ev-qt').forEach(b => {
@@ -1236,13 +1240,21 @@ async function refreshChargeState() {
 
 function updateChargeSession(c) {
     const idleProg = document.getElementById('csIdleProgress');
+    const bydSoc = (typeof c.byd_soc === 'number') ? c.byd_soc : null;
 
-    // Dica de partida da próxima carga (aprendida da última sessão completa).
-    // Só quando estimada — se for input explícito do usuário, o campo já o exibe.
+    // Dica ao lado do campo: com BYD fresco explica que o valor é real e
+    // se atualiza sozinho; sem, mostra a estimativa de partida da próxima
+    // carga (aprendida da última sessão completa), só quando estimada.
     const socHint = document.getElementById('socCurrentHint');
     if (socHint) {
-        socHint.textContent = (!c.charging && c.next_start_soc_is_estimate && c.next_start_soc != null)
-            ? `próxima carga inicia em ~${c.next_start_soc}% (estimado)` : '';
+        if (bydSoc != null) {
+            socHint.textContent = '⚡ BYD · real'
+                + (c.byd_soc_age_min != null ? ' (há ' + c.byd_soc_age_min + ' min)' : '');
+        } else if (!c.charging && c.next_start_soc_is_estimate && c.next_start_soc != null) {
+            socHint.textContent = `próxima carga inicia em ~${c.next_start_soc}% (estimado)`;
+        } else {
+            socHint.textContent = '';
+        }
     }
 
     if (!c.charging && c.state !== 'completing') {
@@ -1258,7 +1270,6 @@ function updateChargeSession(c) {
     // SOC real (BYD) vence a estimativa na EXIBIÇÃO quando há leitura fresca;
     // sem, cai na estimativa do tracker. A estimativa segue governando o
     // auto-stop e a âncora do dono (campo editável) fica intocada.
-    const bydSoc = (typeof c.byd_soc === 'number') ? c.byd_soc : null;
     const currentSocVal = bydSoc != null ? bydSoc : (c.effective_soc ?? 0);
     const elSoc = document.getElementById('csEffectiveSoc');
     if (elSoc) elSoc.textContent = currentSocVal.toFixed(1) + '%';

@@ -1846,6 +1846,45 @@ def estimate_car_soc_start(cfg):
     return 50.0, True
 
 
+def seed_car_soc_from_byd():
+    """Mantém a âncora car_current_soc em dia com o SOC REAL do BYD enquanto
+    a coleta estiver fresca — o dono deixa de precisar digitar.
+
+    Regras (lições 10/10 e 24/10 preservadas):
+    • grava SEMPRE com src='byd' — nunca 'owner', para a η não confundir
+      semente automática com input humano;
+    • se o dono digitou (src='owner'), NÃO sobrescreve: a palavra dele vence
+      até o próximo finalize re-semear (src='seed') e a semente voltar a fluir;
+    • SOC 0 é sentinela da BYD (carro dormindo) — não semeia;
+    • grava só quando o valor muda ≥1% (não reescreve o config a cada poll).
+    """
+    _bs = byd_client.status()
+    if not _bs.get("soc_fresh"):
+        return
+    _snap = _bs.get("snapshot", {})
+    _soc = _snap.get("soc")
+    if _soc is None or float(_soc) <= 1:
+        return
+    _soc = round(float(_soc), 1)
+    cfg = load_config()
+    # src ausente = config pré-24/10 = tratado como owner (mesma regra do
+    # estimate_car_soc_start) — a semente não sobrescreve.
+    if (cfg.get("car_current_soc_src") or "owner") == "owner":
+        return
+    cur = cfg.get("car_current_soc")
+    if cur is not None and abs(float(cur) - _soc) < 1.0:
+        return
+    dts = _snap.get("data_ts")
+    cfg["car_current_soc"] = int(_soc)
+    cfg["car_current_soc_ts"] = (
+        datetime.fromtimestamp(dts).isoformat(timespec="seconds")
+        if dts
+        else datetime.now().isoformat(timespec="seconds")
+    )
+    cfg["car_current_soc_src"] = "byd"
+    save_config(cfg)
+
+
 def update_session_soc_start(session_uuid, soc_start):
     """Persist a mid-session SOC correction to the session's soc_start so the
     Carregamentos tab reports the corrected value."""
@@ -3077,6 +3116,11 @@ def poll_loop():
 
             cfg = load_config()
             cfg_start_power_w = cfg.get("car_charge_start_power_w", 500)
+
+            # ── Semente do SOC: BYD fresco mantém a âncora em dia ──
+            # O dono não precisa mais digitar o "SOC Atual do Carro" enquanto
+            # o carro reporta; input do dono (src='owner') continua vencendo.
+            seed_car_soc_from_byd()
 
             # ── Analisador de tensão (rede fraca/alta com a placa viva) ──
             # Só tensão MEDIDA abre evento: leitura falha (None, ex. wifi do
