@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-31 (2)
+
+### Added
+- 🛡️ **Endurecimento do poll loop pós-incidente (4 camadas)** — o post-mortem de 30/10 mostrou quatro falhas de sistema (não só o `_uuid`): contador do disjuntor atualizado DEPOIS do ramo frágil, seções sem isolamento, log sem timestamp/traceback e watchdog cego ao controle. **(1) Contador antes da detecção:** `prev_br_counter_kwh` agora grava antes de qualquer coisa que levante, e o delta de energia só autoriza detecção com prev RECENTE (≤120s) — prev velho é loop travado, não consumo; mata a classe "gatilho eterno" (detecção disparando com 0,9 W de standby). Bônus: a detecção usa a potência com fallback do contador (antes usava só o DPS 6 cru). **(2) Seções isoladas:** auto-detecção e semente SOC com try/except próprio (mesmo debounce 1º + 1×/hora) — falha nelas não derruba tracker/auto-stop/watchdog do mesmo ciclo. **(3) Log forense:** `_StampedStdout` envolve o stdout no boot e carimba data/hora em cada linha do service.log (zero call-site alterado; testado com multi-linha e concorrência), e o 1º erro de cada sequência (poll, readers, seções) imprime traceback completo. **(4) Heartbeat + vigia:** `/api/status` expõe `poll_age_s` (idade da última iteração bem-sucedida do poll loop) e o `vigia-energia.sh` — agora versionado em `deploy/` e sincronizado a cada deploy — restarta com alerta Telegram se a leitura envelhecer >90s; e o `deploy_cubie.sh` ganhou **guarda de carga**: bloqueia o restart com sessão em curso (`FORCE=1` para forçar) — foi o restart com o carro carregando que criou o boot envenenado.
+
 ## [Unreleased] - 2026-10-31
 
 ### Fixed
