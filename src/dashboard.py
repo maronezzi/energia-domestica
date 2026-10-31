@@ -4855,7 +4855,13 @@ if __name__ == "__main__":
     _row = _active_rows[0] if _active_rows else None
 
     if _row:
-        _id, _uuid, _start_ts, _soc_start, _soc_target, _bat, _start_e, _cost, _soc_end = _row
+        # ⚠️ NÃO renomear para _uuid: desempacotar aqui sobrescreve o alias do
+        # módulo (import uuid as _uuid, linha ~1261) e TODO create_charge_session
+        # passa levantar 'str' object has no attribute uuid4' a cada poll —
+        # incidente 30/10/2026: 12h de poll loop morto e a sessão da noite
+        # inteira nunca gravada. Nomes de unpack em escopo de módulo jamais
+        # podem colidir com aliases de import.
+        _id, _row_uuid, _start_ts, _soc_start, _soc_target, _bat, _start_e, _cost, _soc_end = _row
         # Last known SOC — used only for the log line and to sync
         # car_current_soc (point of departure for the NEXT session).
         _recover_soc = _soc_end if _soc_end and _soc_end > _soc_start else _soc_start
@@ -4869,7 +4875,7 @@ if __name__ == "__main__":
             target_soc=_soc_target,
             battery_kwh=_bat,
             start_energy_kwh=_start_e,
-            session_uuid=_uuid,
+            session_uuid=_row_uuid,
             # Flags persistidos no início da sessão: um deploy/restart no meio
             # da carga não pode apagar o 🎓 (confirmação de partida p/ η)
             soc_confirmed=_cfg.get("car_soc_confirmed", False),
