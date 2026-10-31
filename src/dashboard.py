@@ -9,9 +9,11 @@ LOCAL-FIRST: Coleta local ativa, cloud opcional sob demanda do usuário.
 import json
 import math
 import sqlite3
+import sys
 import threading
 import time
 import base64
+import traceback
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2973,6 +2975,8 @@ def _reader_loop(key, cfg, interval):
             err_streak += 1
             if err_streak == 1 or err_streak % 360 == 0:
                 print(f"Erro {key} ({err_streak} consecutivos): {e}")
+                if err_streak == 1:
+                    traceback.print_exc(file=sys.stdout)
             dev = None
         next_t += interval
         delay = next_t - time.time()
@@ -2983,7 +2987,16 @@ def _reader_loop(key, cfg, interval):
         time.sleep(delay)
 
 
+# Heartbeat do poll loop: momento da última iteração BEM-SUCEDIDA (setado
+# no ramo else do handler). O vigia-energia lê /api/status → poll_age_s:
+# a API HTTP pode estar de pé com o controle morto (incidente 30/10/2026:
+# 12h de uvicorn saudável e poll loop morrendo em todo ciclo).
+_poll_last_ok_ts = None
+
+
 def poll_loop():
+    global _poll_last_ok_ts  # heartbeat p/ vigia (ver /api/status → poll_age_s)
+
     # Threads de leitura: fase1 e breaker em paralelo, cada um no seu ritmo
     for key, cfg in DEVICES.items():
         interval = BREAKER_POLL_INTERVAL if key == "breaker" else POLL_INTERVAL
@@ -2993,6 +3006,11 @@ def poll_loop():
 
     prune_counter = 0
     err_streak = 0
+    # Erros de seções isoladas dentro do poll (try/except próprios na
+    # auto-detecção e na semente SOC) — mesmo debounce do handler externo:
+    # 1º erro e depois 1×/hora, senão uma seção falha inunda o service.log.
+    detect_err_streak = 0
+    seed_err_streak = 0
     # Recupera último dia com snapshot (persiste entre restarts)
     _cfg = load_config()
     last_snapshot_day = _cfg.get("last_snapshot_day", "")
@@ -3068,89 +3086,24 @@ def poll_loop():
             else:
                 breaker_off_streak = 0
 
-            # ── AUTO-DETECT charging: breaker ON with power or energy changing ──
-            if (
-                br
-                and br.get("switch", False)
-                and charging.state == ChargingTracker.STATE_IDLE
-                and (
-                    br.get("power_w", 0)
-                    > cfg_start_power_w
-                    or (
-                        br.get("energy_wh", 0) > 0
-                        and prev_br_counter_kwh is not None
-                        and prev_br_counter_kwh > 0
-                        and br.get("energy_wh", 0) != prev_br_counter_kwh
-                    )
-                )
-            ):
-                cfg_detect = load_config()
-                # SOC inicial: usuário pode ter ligado o disjuntor manualmente
-                # sem informar o SOC — estima a partir da última sessão.
-                soc_start, soc_estimated = estimate_car_soc_start(cfg_detect)
-                if soc_estimated:
-                    print(
-                        f"⚡ SOC inicial estimado em {soc_start:.0f}% "
-                        f"(última sessão / config — corrija no dashboard se o "
-                        f"carro rodou desde a última carga)"
-                    )
-                session = create_charge_session(
-                    soc_start=soc_start,
-                    soc_target=cfg_detect.get("car_target_soc", 80),
-                    battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
-                    start_energy_kwh=br.get("energy_kwh", 0),
-                    cost_per_kwh=cfg_detect.get("kwh_cost", 0.956),
-                )
-                # η: soc_confirmed além do input do usuário quando o SOC inicial
-                # veio de leitura BYD REAL e houve viagem concluída desde a
-                # última carga (prova física de partida — regra 10/10 com âncora)
-                soc_confirmed = not soc_estimated
-                if (
-                    not soc_confirmed
-                    and _byd_anchor_soc() is not None
-                    and _departure_confirmed()
-                ):
-                    soc_confirmed = True
-                    print(
-                        "🎓 Partida real confirmada pelo GPS (viagem desde a "
-                        "última carga) — η pode re-aprender neste ciclo"
-                    )
-                charging.start(
-                    start_soc=soc_start,
-                    target_soc=cfg_detect.get("car_target_soc", 80),
-                    battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
-                    start_energy_kwh=br.get("energy_kwh", 0),
-                    session_uuid=session["session_uuid"],
-                    soc_confirmed=soc_confirmed,
-                )
-                # Sync config so recovery and UI reflect the auto-detected session
-                cfg_detect["car_charging"] = True
-                cfg_detect["car_current_soc"] = soc_start
-                cfg_detect["car_charge_start_kwh"] = br.get("energy_kwh", 0)
-                cfg_detect["car_charge_start_time"] = datetime.now().isoformat()
-                cfg_detect["car_charge_start_soc"] = soc_start
-                # Proveniência do SOC inicial, persistida: sobrevive a restarts
-                # do serviço no meio da carga (ontem um deploy apagou o 🎓 do
-                # GPS e a η perdeu a chance de aprender)
-                cfg_detect["car_soc_confirmed"] = soc_confirmed
-                cfg_detect["car_soc_start_real"] = (
-                    not soc_estimated or _byd_anchor_soc() is not None
-                )
-                save_config(cfg_detect)
-                print("⚡ Auto-detected charging: breaker ON with power, starting session")
-
-            # ── Breaker power, with energy-counter fallback ──
+            # ── Breaker power + contador, ANTES da auto-detecção ──
+            # (incidente 30/10/2026: o update de prev_br_counter_kwh era
+            # DEPOIS do ramo frágil — todo poll que morria congelava o
+            # "último contador visto" e o delta da detecção ficava TRUE
+            # para sempre, com o carro cheio puxando 0,9W. Agora o estado
+            # do contador é resolvido e gravado antes de qualquer coisa
+            # que possa levantar exceção.)
+            br_switch_on = bool(br.get("switch")) if br else False
+            br_power_w = br.get("power_w", 0) if br else 0
+            br_counter_raw = br.get("energy_wh", 0) if br else 0
             # DPS 6 (V×I) sometimes returns 0 during active charging. When it
             # does, estimate power from the DPS 1 cumulative counter delta so
             # auto-detect and idle detection keep working.
-            # NOTE: br_counter_kwh holds the raw DPS 1 value (energy_wh). Per Tuya
+            # NOTE: br_counter_raw holds the raw DPS 1 value (energy_wh). Per Tuya
             # spec (scale=2) each raw unit = 10 Wh = 0.01 kWh. When the DPS 6 base64
             # decode fails and power_w is 0, we estimate power from the counter delta:
             #   delta_J = delta_raw * 10 Wh/unit * 3600 J/Wh = delta_raw * 36000 J
             #   power_W = delta_J / dt_s
-            br_switch_on = bool(br.get("switch")) if br else False
-            br_power_w = br.get("power_w", 0) if br else 0
-            br_counter_raw = br.get("energy_wh", 0) if br else 0
             if (
                 br_power_w <= 0
                 and br_counter_raw > 0
@@ -3162,9 +3115,96 @@ def poll_loop():
                 if 0 < dt_s < 120 and delta_raw > 0:
                     # 1 raw unit = 10 Wh → delta_J = delta_raw * 10 * 3600
                     br_power_w = delta_raw * 36_000.0 / dt_s
+            # Delta do contador com guarda de idade: só autoriza detecção se
+            # prev for RECENTE (≤120s). prev velho = poll loop travado, não
+            # consumo — sem a guarda, um delta congelado vira gatilho eterno.
+            counter_delta_valid = (
+                br_counter_raw > 0
+                and prev_br_counter_kwh is not None
+                and prev_br_counter_kwh > 0
+                and br_counter_raw != prev_br_counter_kwh
+                and prev_br_counter_ts is not None
+                and (datetime.now() - prev_br_counter_ts).total_seconds() < 120
+            )
             if br_counter_raw > 0:
                 prev_br_counter_kwh = br_counter_raw
                 prev_br_counter_ts = datetime.now()
+
+            # ── AUTO-DETECT charging: breaker ON with power or energy changing ──
+            if (
+                br
+                and br.get("switch", False)
+                and charging.state == ChargingTracker.STATE_IDLE
+                and (br_power_w > cfg_start_power_w or counter_delta_valid)
+            ):
+                # Seção isolada: falha aqui (DB, config, tracker) NÃO pode
+                # matar o resto do poll — update do tracker, auto-stop e
+                # watchdog seguem no mesmo ciclo (incidente 30/10: um raise
+                # na detecção derrubava controle inteiro, 12h seguidas).
+                try:
+                    cfg_detect = load_config()
+                    # SOC inicial: usuário pode ter ligado o disjuntor manualmente
+                    # sem informar o SOC — estima a partir da última sessão.
+                    soc_start, soc_estimated = estimate_car_soc_start(cfg_detect)
+                    if soc_estimated:
+                        print(
+                            f"⚡ SOC inicial estimado em {soc_start:.0f}% "
+                            f"(última sessão / config — corrija no dashboard se o "
+                            f"carro rodou desde a última carga)"
+                        )
+                    session = create_charge_session(
+                        soc_start=soc_start,
+                        soc_target=cfg_detect.get("car_target_soc", 80),
+                        battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
+                        start_energy_kwh=br.get("energy_kwh", 0),
+                        cost_per_kwh=cfg_detect.get("kwh_cost", 0.956),
+                    )
+                    # η: soc_confirmed além do input do usuário quando o SOC inicial
+                    # veio de leitura BYD REAL e houve viagem concluída desde a
+                    # última carga (prova física de partida — regra 10/10 com âncora)
+                    soc_confirmed = not soc_estimated
+                    if (
+                        not soc_confirmed
+                        and _byd_anchor_soc() is not None
+                        and _departure_confirmed()
+                    ):
+                        soc_confirmed = True
+                        print(
+                            "🎓 Partida real confirmada pelo GPS (viagem desde a "
+                            "última carga) — η pode re-aprender neste ciclo"
+                        )
+                    charging.start(
+                        start_soc=soc_start,
+                        target_soc=cfg_detect.get("car_target_soc", 80),
+                        battery_kwh=cfg_detect.get("car_battery_kwh", 12.9),
+                        start_energy_kwh=br.get("energy_kwh", 0),
+                        session_uuid=session["session_uuid"],
+                        soc_confirmed=soc_confirmed,
+                    )
+                    # Sync config so recovery and UI reflect the auto-detected session
+                    cfg_detect["car_charging"] = True
+                    cfg_detect["car_current_soc"] = soc_start
+                    cfg_detect["car_charge_start_kwh"] = br.get("energy_kwh", 0)
+                    cfg_detect["car_charge_start_time"] = datetime.now().isoformat()
+                    cfg_detect["car_charge_start_soc"] = soc_start
+                    # Proveniência do SOC inicial, persistida: sobrevive a restarts
+                    # do serviço no meio da carga (ontem um deploy apagou o 🎓 do
+                    # GPS e a η perdeu a chance de aprender)
+                    cfg_detect["car_soc_confirmed"] = soc_confirmed
+                    cfg_detect["car_soc_start_real"] = (
+                        not soc_estimated or _byd_anchor_soc() is not None
+                    )
+                    save_config(cfg_detect)
+                    print("⚡ Auto-detected charging: breaker ON with power, starting session")
+                    detect_err_streak = 0
+                except Exception as e:
+                    detect_err_streak += 1
+                    if detect_err_streak == 1 or detect_err_streak % 360 == 0:
+                        print(
+                            f"⚠️ Auto-detecção falhou ({detect_err_streak} consecutivos): {e}"
+                        )
+                        if detect_err_streak == 1:
+                            traceback.print_exc(file=sys.stdout)
 
             cfg = load_config()
             cfg_start_power_w = cfg.get("car_charge_start_power_w", 500)
@@ -3172,7 +3212,16 @@ def poll_loop():
             # ── Semente do SOC: BYD fresco mantém a âncora em dia ──
             # O dono não precisa mais digitar o "SOC Atual do Carro" enquanto
             # o carro reporta; input do dono (src='owner') continua vencendo.
-            seed_car_soc_from_byd()
+            # Seção isolada (mesmo racional da auto-detecção).
+            try:
+                seed_car_soc_from_byd()
+                seed_err_streak = 0
+            except Exception as e:
+                seed_err_streak += 1
+                if seed_err_streak == 1 or seed_err_streak % 360 == 0:
+                    print(f"⚠️ Semente SOC ({seed_err_streak} consecutivos): {e}")
+                    if seed_err_streak == 1:
+                        traceback.print_exc(file=sys.stdout)
 
             # ── Analisador de tensão (rede fraca/alta com a placa viva) ──
             # Só tensão MEDIDA abre evento: leitura falha (None, ex. wifi do
@@ -3592,12 +3641,17 @@ def poll_loop():
 
         except Exception as e:
             # 1º erro e depois ~1x/hora (360 ciclos × 5s) — falha persistente
-            # (ex.: disco cheio) não inunda o service.log.
+            # (ex.: disco cheio) não inunda o service.log. O 1º da sequência
+            # leva traceback completo: só o {e} escondeu a causa do incidente
+            # de 30/10/2026 ('str' object has no attribute 'uuid4') por 12h.
             err_streak += 1
             if err_streak == 1 or err_streak % 360 == 0:
                 print(f"Poll error ({err_streak} consecutivos): {e}")
+                if err_streak == 1:
+                    traceback.print_exc(file=sys.stdout)
         else:
             err_streak = 0
+            _poll_last_ok_ts = time.time()  # heartbeat p/ vigia
         time.sleep(POLL_INTERVAL)
 
 
@@ -3612,6 +3666,11 @@ def api_status():
             "timestamp": datetime.now().isoformat(),
             "devices": state.latest,
             "config": load_config(),
+            # Heartbeat do poll loop (vigia-energia exige frescor; API de pé
+            # com controle morto foi o cego do incidente de 30/10/2026)
+            "poll_age_s": (
+                int(time.time() - _poll_last_ok_ts) if _poll_last_ok_ts else None
+            ),
         }
 
 
@@ -4819,7 +4878,49 @@ def root():
     }
 
 
+class _StampedStdout:
+    """Prefixa data/hora em cada linha impressa no service.log.
+
+    O serviço roda com stdout redirecionado a arquivo (OpenRC) e TODO o
+    log nasce de print() cru — sem timestamp por linha, um incidente como
+    o de 30/10/2026 só pode ser reconstruído contando linhas. Envolve o
+    stdout UMA vez no boot; nenhum print precisa mudar. Só carimba no
+    início de linha (print() escreve o texto e o \\n em chamadas bytes
+    separadas — o flag _at_start cobre os dois casos).
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._at_start = True
+        self._lock = threading.Lock()
+
+    def write(self, s):
+        if not s:
+            return 0
+        with self._lock:
+            out = []
+            for i, chunk in enumerate(s.split("\n")):
+                if i > 0:
+                    out.append("\n")
+                    self._at_start = True
+                if chunk:
+                    if self._at_start:
+                        out.append(f"{datetime.now():%Y-%m-%d %H:%M:%S} | ")
+                        self._at_start = False
+                    out.append(chunk)
+            self._stream.write("".join(out))
+            self._stream.flush()
+        return len(s)
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):  # delega fileno/isatty/encoding...
+        return getattr(self._stream, name)
+
+
 if __name__ == "__main__":
+    sys.stdout = _StampedStdout(sys.stdout)
     print("""
 ╔══════════════════════════════════════════════════════════╗
 ║  ⚡ Energia Dashboard — http://localhost:8050           ║
