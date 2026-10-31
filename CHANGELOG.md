@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-10-31
+
+### Fixed
+- 🐍 **Boot com sessão ativa envenenava `_uuid` e matava o poll loop por 12h — a carga completa da noite ficou fora do histórico** — o deploy de 30/10 19:33 restartou o serviço com o carro carregando (sessão 145 ativa desde 19:09); a recuperação de sessão no startup desempacotava a linha do DB em `_id, _uuid, _start_ts, ...` — e `_uuid` é o MESMO nome do alias `import uuid as _uuid`. A partir do boot, o global `_uuid` era a STRING do UUID da sessão, e TODO `create_charge_session()` levantava `AttributeError: 'str' object has no attribute 'uuid4'` (linha 1274) — o poll loop morria antes de criar a sessão, antes de salvar config e antes de atualizar `prev_br_counter_kwh`. Dois agravantes: (1) o handler de erro do poll imprime só o 1º erro e depois 1×/hora — 7.656 tentativas falhas viraram ~22 linhas de log; (2) com `prev_br_counter_kwh` congelado no valor das 20h (118.580 raw), o ramo de DELTA de energia da auto-detecção ficou TRUE para sempre — mesmo com o carro cheio puxando 0,9 W, a detecção disparava a cada 5,5 s. A tempestade durou de 21:39 (dono religou) até 09:28 (dono enviou DESLIGAR via app — switch=0 mata a condição de gatilho). A sessão noturna (9,3 kWh, 42→100%, 3h29min) nunca virou linha no DB; o snapshot do dia 30 fechou 9h33 atrasado. Correção: o unpack usa `_row_uuid` (com guarda em comentário: nomes de unpack em escopo de módulo jamais colidem com aliases de import). Reproduzido em ambiente isolado antes/depois; 180 testes passam. Sessão noturna reconstruída dos readings (contador 1185,8→1195,1 kWh) e inserida no histórico.
+
 ## [Unreleased] - 2026-10-30
 
 ### Fixed
