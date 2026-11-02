@@ -148,7 +148,8 @@ Configurável em `data/tuya_config.json`:
 | `/api/charge/summary` | GET | Resumo agregado (kWh, R$, duração) |
 | `/api/hourly` | GET | Consumo hora a hora de um dia |
 | `/api/outages` | GET | Apagões e eventos de tensão (resumo + lista, `?days=N`) |
-| `/api/power_quality` | GET | Analisador de tensão: mín/média/máx e % por faixa ANEEL/dia |
+| `/api/power_quality` | GET | Analisador de tensão: mín/média/máx e % por faixa ANEEL/dia — casa (127 V) e carro (`car`, 220 V) |
+| `/api/refresh` | POST | Botão "Atualizar": re-lê os dois medidores e pede coleta imediata do BYD |
 | `/api/car/start-charge` | POST | Liga disjuntor + inicia tracking |
 | `/api/car/stop-charge` | POST | Desliga + finaliza sessão no DB |
 | `/api/breaker/on` | POST | Liga disjuntor direto |

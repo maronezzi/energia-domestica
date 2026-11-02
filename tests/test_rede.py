@@ -403,6 +403,43 @@ class TestApis(RedeTestCase):
         self.assertEqual(day["pct_precaria"], 20.0)
         self.assertEqual(day["pct_critica"], 20.0)
 
+    def test_power_quality_secao_carro_220v(self):
+        """Circuito do carro (readings.phase_a): faixas ANEEL de 220 V e o
+        piso de 50 V — 0.0 é falha do DPS 6 (~79% das leituras) e NÃO pode
+        sujar o mínimo do dia."""
+        now = datetime.now()
+        conn = self.d.get_db()
+        try:
+            # (phase_a, phase_b=corrente, phase_c=potência — colunas do breaker)
+            for v in (220.0, 210.0, 195.0, 185.0, 235.0):
+                conn.execute(
+                    "INSERT INTO readings (timestamp, device, phase_a) VALUES (?,?,?)",
+                    (_iso(now - timedelta(seconds=1)), "fase1", v),
+                )
+            # falhas do DPS 6: 0.0 e valor sujo baixo — excluídos pelo piso
+            for v in (0.0, 30.0):
+                conn.execute(
+                    "INSERT INTO readings (timestamp, device, phase_a) VALUES (?,?,?)",
+                    (_iso(now - timedelta(seconds=2)), "fase1", v),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        out = self.d._power_quality_payload(7)
+        self.assertEqual(out["car"]["nominal_v"], 220)
+        self.assertEqual(out["car"]["bands"]["adequada"], [202, 231])
+        cday = out["car"]["days"][0]
+        self.assertEqual(cday["samples"], 5)  # 0.0 e 30.0 fora
+        self.assertEqual(cday["min_v"], 185.0)
+        self.assertEqual(cday["max_v"], 235.0)
+        # 220, 210 adequadas (2); 195 precária (1); 185, 235 críticas (2)
+        self.assertEqual(cday["pct_adequada"], 40.0)
+        self.assertEqual(cday["pct_precaria"], 20.0)
+        self.assertEqual(cday["pct_critica"], 40.0)
+        # a seção da casa continua 127 V e intacta
+        self.assertEqual(out["nominal_v"], 127)
+        self.assertEqual(out["days"], [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -89,6 +89,7 @@ DEFAULT_CONFIG = {
     "car_fuel_price": None,  # R$/L do combustível — dono informa na aba Config
     "car_tank_l": 48,  # capacidade do tanque (Song Pro DM-i ≈ 48 L) — estima litros abastecidos
     "grid_nominal_v": 127,  # tensão nominal da casa (fase1) — faixas ANEEL derivadas dela
+    "grid_car_nominal_v": 220,  # tensão nominal do circuito do carro (disjuntor, fase-fase)
     "outage_min_gap_s": 900,  # backfill: lacuna de leituras ≥ 15 min com reboot vira apagão
     "cloud_enabled": False,  # Cloud OFF by default - user decides
 }
@@ -3893,33 +3894,29 @@ def api_outages(days: int = 30):
     )
 
 
-def _power_quality_payload(days: int):
-    """Analisador de tensão: min/média/máx e % do tempo em cada faixa ANEEL
-    por dia (fase 1 da casa)."""
-    days = max(1, min(days, 3650))
-    nominal = load_config().get("grid_nominal_v", 127)
-    adeq_lo, adeq_hi, prec_lo, prec_hi = _voltage_bands(nominal)
-    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    conn = get_db()
-    try:
-        # timestamp >= ? (prefixo ISO) usa o índice (device, timestamp) e
-        # varre só a janela; DATE(timestamp) >= ? varria a tabela inteira
-        # (~10s na CubieBoard no primeiro load).
-        rows = conn.execute(
-            """SELECT DATE(timestamp) AS d, COUNT(*),
-                      MIN(voltage), MAX(voltage), AVG(voltage),
-                      SUM(CASE WHEN voltage BETWEEN ? AND ? THEN 1 ELSE 0 END),
-                      SUM(CASE WHEN (voltage >= ? AND voltage < ?)
-                                OR (voltage > ? AND voltage <= ?) THEN 1 ELSE 0 END),
-                      SUM(CASE WHEN voltage < ? OR voltage > ? THEN 1 ELSE 0 END)
-               FROM readings
-               WHERE device='fase1' AND voltage IS NOT NULL AND timestamp >= ?
-               GROUP BY d ORDER BY d""",
-            (adeq_lo, adeq_hi, prec_lo, adeq_lo, adeq_hi, prec_hi,
-             prec_lo, prec_hi, since),
-        ).fetchall()
-    finally:
-        conn.close()
+def _daily_voltage_stats(conn, col: str, since: str, bands: tuple):
+    """Agregação diária de tensão (mín/média/máx + % por faixa ANEEL).
+
+    Piso de 50 V: tensão 0.0 é FALHA de leitura (DPS 6 do disjuntor falha
+    em ~79% dos polls; a fase1 valida >50 V antes de gravar) — sem o piso,
+    os zeros sujam o mínimo dos dias. Piso aplicado aos dois canais: na
+    fase1 é redundante (nada abaixo de 50 V é gravado) e no carro é o filtro.
+    """
+    adeq_lo, adeq_hi, prec_lo, prec_hi = bands
+    rows = conn.execute(
+        f"""SELECT DATE(timestamp) AS d, COUNT(*),
+                  MIN({col}), MAX({col}), AVG({col}),
+                  SUM(CASE WHEN {col} BETWEEN ? AND ? THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN ({col} >= ? AND {col} < ?)
+                            OR ({col} > ? AND {col} <= ?) THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN {col} < ? OR {col} > ? THEN 1 ELSE 0 END)
+           FROM readings
+           WHERE device='fase1' AND {col} IS NOT NULL AND {col} > 50
+             AND timestamp >= ?
+           GROUP BY d ORDER BY d""",
+        (adeq_lo, adeq_hi, prec_lo, adeq_lo, adeq_hi, prec_hi,
+         prec_lo, prec_hi, since),
+    ).fetchall()
     out = []
     for d, n, vmin, vmax, vavg, n_adeq, n_prec, n_crit in rows:
         out.append({
@@ -3932,14 +3929,46 @@ def _power_quality_payload(days: int):
             "pct_precaria": round(100.0 * n_prec / n, 2),
             "pct_critica": round(100.0 * n_crit / n, 2),
         })
-    return {
-        "nominal_v": nominal,
-        "bands": {
+    return out
+
+
+def _power_quality_payload(days: int):
+    """Analisador de tensão por dia: fase 1 da casa (127 V) e circuito do
+    carro (220 V, readings.phase_a) — min/média/máx e % do tempo em cada
+    faixa ANEEL."""
+    days = max(1, min(days, 3650))
+    nominal = load_config().get("grid_nominal_v", 127)
+    car_nominal = load_config().get("grid_car_nominal_v", 220)
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = get_db()
+    try:
+        # timestamp >= ? (prefixo ISO) usa o índice (device, timestamp) e
+        # varre só a janela; DATE(timestamp) >= ? varria a tabela inteira
+        # (~10s na CubieBoard no primeiro load).
+        house = _daily_voltage_stats(
+            conn, "voltage", since, _voltage_bands(nominal))
+        car = _daily_voltage_stats(
+            conn, "phase_a", since, _voltage_bands(car_nominal))
+    finally:
+        conn.close()
+
+    def _bands(b):
+        adeq_lo, adeq_hi, prec_lo, prec_hi = b
+        return {
             "adequada": [adeq_lo, adeq_hi],
             "precaria": [[prec_lo, adeq_lo], [adeq_hi, prec_hi]],
             "critica": [[None, prec_lo], [prec_hi, None]],
+        }
+
+    return {
+        "nominal_v": nominal,
+        "bands": _bands(_voltage_bands(nominal)),
+        "days": house,
+        "car": {
+            "nominal_v": car_nominal,
+            "bands": _bands(_voltage_bands(car_nominal)),
+            "days": car,
         },
-        "days": out,
     }
 
 
@@ -3950,6 +3979,37 @@ def api_power_quality(days: int = 30):
     return _ttl_get_or_compute(
         ("power_quality", days), 300, lambda: _power_quality_payload(days)
     )
+
+
+@app.post("/api/refresh")
+def api_refresh():
+    """Botão 'Atualizar' do header: re-lê os DOIS medidores Tuya agora,
+    pede coleta imediata do BYD e devolve o resultado por canal.
+
+    NÃO limpa _ttl_cache de propósito: os agregados (power_quality etc.) são
+    caros na placa (~10s de varredura) e uma re-coleta de dispositivos não
+    muda estatística de dia fechado — os TTLs próprios cuidam da frescor.
+    """
+    detail = {}
+    for key in ("fase1", "breaker"):
+        try:
+            d = connect_device(DEVICES[key])
+            st = read_fase1(d) if key == "fase1" else read_breaker(d)
+            state.update(key, st)
+            detail[key] = "ok" if st else "falha"
+        except Exception as e:
+            detail[key] = f"erro: {e}"
+    try:
+        detail["byd"] = (
+            "solicitado" if byd_client.request_poll_now() else "poller indisponível"
+        )
+    except Exception as e:
+        detail["byd"] = f"erro: {e}"
+    return {
+        "success": True,
+        "detail": detail,
+        "ts": datetime.now().isoformat(timespec="seconds"),
+    }
 
 
 @app.post("/api/breaker/on")
@@ -4758,6 +4818,7 @@ def api_config_update(cfg: dict = None):
         "car_fuel_price",
         "car_tank_l",
         "grid_nominal_v",
+        "grid_car_nominal_v",
         "cloud_enabled",
     }
     # Tipo e faixa por chave: valor ruim salvo no config vira 500 permanente
@@ -4778,6 +4839,7 @@ def api_config_update(cfg: dict = None):
         "car_fuel_price": (0.0, 100.0),
         "car_tank_l": (5.0, 200.0),
         "grid_nominal_v": (100.0, 260.0),
+        "grid_car_nominal_v": (100.0, 260.0),
     }
     CONFIG_BOOL_KEYS = {"car_charging", "car_charge_auto_stop", "cloud_enabled"}
     CONFIG_STR_KEYS = {"kwh_currency", "car_charge_start_time"}

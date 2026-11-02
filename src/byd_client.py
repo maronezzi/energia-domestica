@@ -76,6 +76,28 @@ _st: dict = {
     "gps": {},               # última posição
 }
 
+# "Atualizar" sob demanda: Event criado no loop do poller (_run_loop);
+# request_poll_now() o liga de outra thread via call_soon_threadsafe.
+_force_poll = None       # asyncio.Event | None (até o poller subir)
+_byd_loop = None         # loop onde o poller roda (p/ call_soon_threadsafe)
+
+
+async def _sleep_or_force(seconds: float) -> bool:
+    """Espera `seconds` OU um pedido de coleta imediata (botão Atualizar).
+
+    True = pedido chegou — o loop coleta de novo sem esperar o intervalo.
+    Usado nos sleeps do _run_loop (normal e erro de coleta); o backoff de
+    auth NÃO é interruptível de propósito (não martelar o endpoint BYD).
+    """
+    if _force_poll is None:
+        await asyncio.sleep(max(0.5, seconds))
+        return False
+    try:
+        await asyncio.wait_for(_force_poll.wait(), timeout=max(0.5, seconds))
+        return True
+    except asyncio.TimeoutError:
+        return False
+
 
 def _load_cfg() -> dict | None:
     """data/byd.json como dict, ou None se ausente/desabilitado/placeholder."""
@@ -649,6 +671,24 @@ def fresh_soc() -> float | None:
     return _f(soc)
 
 
+def request_poll_now() -> bool:
+    """Pedido de coleta IMEDIATA do carro (botão Atualizar do dashboard).
+
+    True = poller vivo, coleta agendada para já. False = poller não está
+    rodando (config ausente, login quebrado, thread morta) — nada a forçar;
+    o last_error da aba Carro explica o porquê.
+    """
+    with _lock:
+        alive = bool(_st.get("running"))
+        loop = _byd_loop
+    if not alive or loop is None or loop.is_closed():
+        return False
+    if _force_poll is None:
+        return False
+    loop.call_soon_threadsafe(_force_poll.set)
+    return True
+
+
 def history(hours: int = 24) -> list[dict]:
     """Série de snapshots para gráficos. [] se as tabelas ainda não existem."""
     since = time.time() - max(1, int(hours)) * 3600
@@ -1162,10 +1202,14 @@ def _next_interval(snap: dict, moving: bool) -> float:
 
 
 async def _run_loop():
-    global _reauth_state
+    global _reauth_state, _force_poll, _byd_loop
     cfg = _load_cfg()
     backoff_k = 0
     err_count = 0
+    # Sinalização do "Atualizar" (botão): Event vive NO loop do poller;
+    # request_poll_now() o liga de outra thread via call_soon_threadsafe.
+    _byd_loop = asyncio.get_running_loop()
+    _force_poll = asyncio.Event()
     while True:
         injected_this_run = False
         try:
@@ -1217,7 +1261,7 @@ async def _run_loop():
                             print(f"BYD: erro de coleta ({err_count}x): {e}")
                         with _lock:
                             _st["last_error"] = str(e)
-                        await asyncio.sleep(POLL_CHARGING)
+                        await _sleep_or_force(POLL_CHARGING)
                         continue
                     # coleta OK: sessão provada (cortesia armada) e tokens
                     # novos — de re-login interno do pybyd — são persistidos
@@ -1258,9 +1302,9 @@ async def _run_loop():
                     if moving != moving_prev:
                         print(f"BYD: carro {'em movimento' if moving else 'parado'}")
                     moving_prev = moving
-                    await asyncio.sleep(
-                        max(5, _next_interval(snap, moving) - (time.monotonic() - t0))
-                    )
+                    interval = max(5, _next_interval(snap, moving) - (time.monotonic() - t0))
+                    if await _sleep_or_force(interval):
+                        print("BYD: coleta sob demanda (botão Atualizar)")
         except asyncio.CancelledError:
             raise
         except Exception as e:

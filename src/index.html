@@ -301,6 +301,9 @@
         <div><div class="logo-text">Energia Doméstica</div><div class="logo-sub">Monitoramento Local</div></div>
     </div>
     <div class="header-right">
+        <button class="hly-nav" id="btnRefreshAll" onclick="refreshAllData()"
+            title="Coleta tudo agora: medidores (casa + carro) e o carro BYD"
+            style="padding:.45rem .85rem;font-size:.85rem">🔄 Atualizar</button>
         <div class="live-badge"><div class="live-dot" id="liveDot"></div><span id="statusText">Conectando</span></div>
         <div class="last-update" id="lastUpdate">—</div>
     </div>
@@ -909,6 +912,7 @@ carro —</div></div></div>
 <div id="tab-rede" class="tab-content">
     <div class="summary" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">
         <div class="sum-card"><div class="big" id="rdVoltNow">—</div><div class="lbl">Tensão agora</div><div class="sub" id="rdVoltZone">—</div></div>
+        <div class="sum-card"><div class="big" id="rdCarVolt">—</div><div class="lbl" title="Disjuntor do carro (fase-fase, 220 V) — DPS 6 reporta em ~1 de cada 5 polls">🚗 Tensão do carro</div><div class="sub" id="rdCarVoltZone">—</div></div>
         <div class="sum-card"><div class="big" id="rdApagoes">—</div><div class="lbl" title="Vezes que a energia acabou — a placa reiniciou junto">🕯️ Apagões</div><div class="sub" id="rdApagoesSub">—</div></div>
         <div class="sum-card"><div class="big" id="rdTotal">—</div><div class="lbl">Tempo sem energia</div><div class="sub" id="rdTotalSub">—</div></div>
         <div class="sum-card"><div class="big" id="rdLongest">—</div><div class="lbl">Maior apagão</div><div class="sub" id="rdLongestSub">—</div></div>
@@ -929,6 +933,14 @@ carro —</div></div></div>
         <div style="font-size:.75rem;color:var(--dim);margin-top:.6rem" id="rdBandLegend">—</div>
     </div>
 
+    <div class="chart-card" style="margin-bottom:1.5rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">
+            <h3 style="margin:0">🚗 Analisador de Tensão — Carro (220 V)</h3>
+        </div>
+        <div class="chart-box" style="height:250px"><canvas id="chartVoltCar"></canvas></div>
+        <div style="font-size:.75rem;color:var(--dim);margin-top:.6rem" id="rdCarBandLegend">—</div>
+    </div>
+
     <div class="table-card">
         <h3>🕯️ Apagões e Eventos de Tensão</h3>
         <div class="table-wrap">
@@ -939,7 +951,7 @@ carro —</div></div></div>
         </div>
         <div style="font-size:.75rem;color:var(--dim);margin-top:.6rem">
             🕯️ <b>Apagão</b> = a energia acabou de verdade (a placa reiniciou junto — mesma fonte). Início e fim são estimativas com precisão de ~1 min: início = última leitura com energia, fim = boot da placa.
-            ⬇⬆ <b>Tensão baixa/alta</b> = mediu tensão fora da faixa com a placa viva (rede fraca/oscilando).
+            ⬇⬆ <b>Tensão baixa/alta</b> = mediu tensão fora da faixa com a placa viva (rede fraca/oscilando) — <b>eventos ao vivo ficam na fase da casa</b>; o disjuntor do carro reporta tensão em ~1 de cada 5 polls (DPS 6 falhando), então o carro tem analisador diário (gráfico acima), não eventos ao vivo.
             🕳️ <b>Sem monitoramento</b> = não houve leituras e não há prova do motivo (pode ser energia, Wi-Fi ou o próprio serviço — a energia NÃO é afirmada).
             Wi-Fi do medidor cair <b>não</b> vira apagão — sem leitura não há registro falso.
         </div>
@@ -970,7 +982,7 @@ carro —</div></div></div>
 <script>
 const POLL = 3000;
 let kwhCost = 0.956, curYear, curMonth;
-let cPower, cEnergy, cDaily, cHourly, cVolt;
+let cPower, cEnergy, cDaily, cHourly, cVolt, cVoltCar;
 
 const fmt = (v, d=1) => v > 0 ? v.toFixed(d) : '—';
 const fmtR = (v) => 'R$ ' + v.toFixed(2);
@@ -2384,9 +2396,38 @@ async function saveFuel() {
     a.style.display = 'block'; setTimeout(() => a.style.display = 'none', 3000);
 }
 
+// ─── Botão "Atualizar" (header): força coleta de tudo ─────────
+let refreshingAll = false;
+async function refreshAllData() {
+    if (refreshingAll) return;
+    const btn = document.getElementById('btnRefreshAll');
+    if (!btn) return;
+    refreshingAll = true;
+    const original = '🔄 Atualizar';
+    btn.textContent = '⏳ Atualizando…';
+    btn.disabled = true;
+    try {
+        // o servidor re-lê os dois medidores (até ~8s com DPS lento) e pede
+        // a coleta imediata do BYD — esperar um pouco para ela aterrissar
+        const r = await fetch('/api/refresh', {method: 'POST'});
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        await new Promise(res => setTimeout(res, 4000));
+        await Promise.allSettled([fetchStatus(), refreshChargeState()]);
+        if (document.getElementById('tab-rede')?.classList.contains('active')) loadRede();
+        if (document.getElementById('tab-byd')?.classList.contains('active')) loadByd();
+        if (document.getElementById('tab-history')?.classList.contains('active')) loadHistory();
+        if (document.getElementById('tab-charges')?.classList.contains('active')) loadCharges();
+        btn.textContent = '✅ Atualizado';
+    } catch (e) {
+        btn.textContent = '❌ Erro';
+    }
+    setTimeout(() => { btn.textContent = original; btn.disabled = false; refreshingAll = false; }, 2500);
+}
+
 // ─── Rede: apagões + analisador de tensão ─────────────────────
 let redeDays = 30;
 let voltDayData = [], voltFullDate = [], voltOutageByDay = {};
+let voltCarDayData = [], voltCarFullDate = [];
 
 function initVoltChart() {
     cVolt = new Chart(document.getElementById('chartVolt'), {
@@ -2418,6 +2459,48 @@ function initVoltChart() {
                             const day = voltDayData[items[0]?.dataIndex]?.day;
                             const dur = voltOutageByDay[day];
                             return dur ? '🕯️ Apagão neste dia: ' + dur : '';
+                        }
+                    }
+                }
+            },
+            scales:{
+                x:{ticks:{color:'#64748b', maxTicksLimit:16}, grid:{color:'rgba(255,255,255,.03)'}},
+                y:{ticks:{color:'#64748b', stepSize:5}, grid:{color:'rgba(255,255,255,.05)'}}
+            }
+        }
+    });
+}
+
+function initVoltCarChart() {
+    cVoltCar = new Chart(document.getElementById('chartVoltCar'), {
+        type:'bar',
+        data:{labels:[], datasets:[
+            {label:'Mín–Máx (V)', data:[], backgroundColor:[], borderColor:'rgba(226,232,240,.35)', borderWidth:1.5, borderRadius:3, barPercentage:.78, order:3},
+            {label:'Média', data:[], type:'line', borderColor:'#3b82f6', borderWidth:2, pointRadius:0, tension:.3, order:2},
+            {label:'Faixa adequada inf.', data:[], type:'line', borderColor:'rgba(245,158,11,.55)', borderDash:[6,5], borderWidth:1.5, pointRadius:0, order:1},
+            {label:'Faixa adequada sup.', data:[], type:'line', borderColor:'rgba(245,158,11,.55)', borderDash:[6,5], borderWidth:1.5, pointRadius:0, order:1}
+        ]},
+        options:{
+            responsive:true, maintainAspectRatio:false, animation:{duration:200},
+            interaction:{mode:'index', intersect:false},
+            plugins:{
+                legend:{labels:{color:'#64748b', font:{size:11}, filter:(it) => it.datasetIndex <= 1}},
+                tooltip:{
+                    backgroundColor:'rgba(10,14,20,.95)', borderColor:'rgba(255,255,255,.12)', borderWidth:1,
+                    filter:(it) => it.datasetIndex <= 1,
+                    callbacks:{
+                        title:(items) => items.length ? 'Dia ' + (voltCarFullDate[items[0].dataIndex] || items[0].label) : '',
+                        label:(item) => {
+                            const d = voltCarDayData[item.dataIndex];
+                            if (!d) return null;
+                            const n = d.samples != null ? ` · ${d.samples} leituras válidas` : '';
+                            return item.datasetIndex === 1
+                                ? 'Média: ' + d.avg_v.toFixed(1) + ' V' + n
+                                : 'Mín: ' + d.min_v.toFixed(1) + ' V · Máx: ' + d.max_v.toFixed(1) + ' V' + n;
+                        },
+                        footer:(items) => {
+                            const d = voltCarDayData[items[0]?.dataIndex];
+                            return d ? 'DPS 6 do disjuntor falha com frequência — só leituras válidas (>50 V) entram.' : '';
                         }
                     }
                 }
@@ -2553,6 +2636,44 @@ function renderOutageTable(o) {
 }
 
 let redeRetry = 0;
+function renderCarVolt(qCar, st) {
+    if (!cVoltCar || !qCar?.bands) return;
+    const days = qCar.days || [];
+    const alo = qCar.bands.adequada[0], ahi = qCar.bands.adequada[1];
+    const plo = qCar.bands.precaria[0][0], phi = qCar.bands.precaria[1][1];
+    voltCarDayData = days;
+    voltCarFullDate = days.map(d => d.day.slice(8) + '/' + d.day.slice(5, 7) + '/' + d.day.slice(0, 4));
+    const labels = days.map(d => d.day.slice(8) + '/' + d.day.slice(5, 7));
+    const colors = days.map(d =>
+        (d.min_v < plo || d.max_v > phi) ? 'rgba(239,68,68,.55)'
+        : (d.min_v < alo || d.max_v > ahi) ? 'rgba(245,158,11,.5)'
+        : 'rgba(59,130,246,.45)');
+    cVoltCar.data.labels = labels;
+    cVoltCar.data.datasets[0].data = days.map(d => [d.min_v, d.max_v]);
+    cVoltCar.data.datasets[0].backgroundColor = colors;
+    cVoltCar.data.datasets[1].data = days.map(d => d.avg_v);
+    cVoltCar.data.datasets[2].data = labels.map(() => alo);
+    cVoltCar.data.datasets[3].data = labels.map(() => ahi);
+    if (days.length) {
+        const dmin = Math.min(...days.map(d => d.min_v), alo);
+        const dmax = Math.max(...days.map(d => d.max_v), ahi);
+        cVoltCar.options.scales.y.min = Math.max(0, Math.floor(dmin - 3));
+        cVoltCar.options.scales.y.max = Math.ceil(dmax + 3);
+    }
+    cVoltCar.update('none');
+    document.getElementById('rdCarBandLegend').textContent =
+        `Faixa adequada (ANEEL 220 V): ${alo}–${ahi} V · Precária: ${plo}–${alo} / ${ahi}–${phi} V · Crítica: <${plo} ou >${phi} V — barra = mín–máx do dia (azul dentro da faixa, âmbar precária, vermelha crítica), linha = média.`;
+    // Card "Tensão do carro agora" (leitura ao vivo do breaker)
+    const brV = st?.devices?.breaker?.voltage_v ?? null;
+    const v = (brV != null && brV > 50) ? brV : null;
+    const el = document.getElementById('rdCarVolt');
+    const z = voltZoneOf(v, qCar);
+    el.textContent = v != null ? v.toFixed(1) + ' V' : 'sem leitura';
+    el.style.color = z ? z.color : 'var(--dim)';
+    document.getElementById('rdCarVoltZone').textContent = z ? z.txt : '—';
+    document.getElementById('rdCarVoltZone').style.color = z ? z.color : 'var(--dim)';
+}
+
 async function loadRede() {
     try {
         const [o, q] = await Promise.all([
@@ -2563,6 +2684,7 @@ async function loadRede() {
         try { st = await fetch('/api/status').then(r => r.json()); } catch (e) {}
         renderRedeSummary(o, st, q);
         renderVoltChart(q, o);
+        renderCarVolt(q.car, st);
         renderOutageTable(o);
         redeRetry = 0;
     } catch (e) {
@@ -2575,6 +2697,7 @@ async function loadRede() {
 // Init
 initCharts();
 initVoltChart();
+initVoltCarChart();
 initBydChart();
 initBydDailyChart();
 initFuelLevelChart();

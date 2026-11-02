@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased] - 2026-11-02
+
+### Added
+- 🚗 **Analisador de Tensão do CARRO (220 V) na aba ⚡ Rede** — a fase da casa (127 V) já tinha card, gráfico diário e eventos; o disjuntor do carro agora tem o MESMO tratamento de análise: card "🚗 Tensão do carro" ao vivo com zona ANEEL (220 V) e segundo gráfico diário "Mín–Máx" com as faixas ANEEL de 220 V (adequada 202–231, precária 188–202/231–233, crítica <188/>233), tooltip com nº de leituras válidas e eixo colado nos dados. API: `/api/power_quality` ganhou a seção `car` (agregação de `readings.phase_a` — mesmo padrão da casa, extraída em `_daily_voltage_stats`) e config `grid_car_nominal_v` (whitelisted, 100–260). **Piso de 50 V na agregação**: o DPS 6 do disjuntor falha em ~79% dos polls (grava 0.0) — sem o piso, os zeros sujavam o mínimo dos dias. **Eventos ao vivo de tensão ficam na fase da casa de propósito**: com ~1 leitura válida a cada 5 polls, um watcher do carro seria inerte/ruidoso — a nota da tabela explica (decisão da crítica do plano, PLAN.md no repo).
+- 🔄 **Botão "Atualizar" no header** — coleta tudo sob demanda: re-lê os DOIS medidores Tuya na hora (mesmo padrão do /api/breaker/on), pede coleta IMEDIATA do BYD e recarrega os dados de todas as abas ativas. byd_client ganhou `_sleep_or_force()` (o sleep do poller — normal e erro de coleta — é interrompido pelo pedido via `asyncio.Event` + `call_soon_threadsafe`, sem executor) e `request_poll_now()` público (False honesto com poller morto); o **backoff de auth permanece não-interruptível de propósito** (não martelar o endpoint BYD com credenciais quebradas). `POST /api/refresh` NÃO limpa `_ttl_cache` de propósito (power_quality custa ~10s de CPU na placa e estatística de dia fechado não muda com re-coleta — TTLs próprios cuidam da frescor). 8 testes novos (188 no total).
+
 ## [Unreleased] - 2026-10-31 (2)
 
 ### Added
