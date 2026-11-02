@@ -23,4 +23,4 @@
    - Check: `pytest tests/test_byd_refresh.py` (endpoint com leituras mockadas; request_poll_now chamado) + `node --check`. ✅ **7 passed; JS/py OK** (2026-11-02)
 
 5. **Suite completa + docs + deploy + verificação ao vivo** — pytest 100%, CHANGELOG/README, deploy_cubie.sh, `curl /api/power_quality` (seção car na placa), clique no botão ao vivo (BYD `data_age_s` cai; loaders recarregam), screenshots.
-   - Check: suite verde + evidências da placa + browser ao vivo.
+   - Check: suite verde + evidências da placa + browser ao vivo. ✅ **188 passed; deploy FORCE=1 (guarda de carga — carro carregando, endurecimento 31/10 cobre); placa: 31 dias de barras do carro, card 213,0 V, BYD data_age 57s→7s no clique** (2026-11-02)
