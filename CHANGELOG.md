@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-11-02 (3)
+
+### Added
+- 🛡️ **Guarda de energia no PC — o computador de bateria vira sentinela da casa** — quando a rede cai, o carregador do PC desliga (`ADP1/online → 0`) e a placa sai do ar em segundos: dois sinais físicos que juntos CONFIRMAM a falta (2 ticks de debounce, ~30s). Confirmada: alerta crítico NA TELA (notify-send por sessão gráfica ativa via loginctl), Telegram best-effort (o roteador morre junto — o alerta de QUEDA pode não sair; o de VOLTA sai confiável), **minimização de recursos** (para `ollama.service` — lista configurável via `GUARDA_UNITS` — e a própria cadência cai de 15s para 60s) e aviso de bateria < 20% ("a guarda morre em breve"). Carregador fora com a placa NO AR não é falta: alguém desplugou o PC — alerta só na tela, sem tocar em nada. Recuperação (carregador de volta por 2 ticks): alerta com a DURAÇÃO da queda + religa os serviços. A queda sobrevive a restart da guarda (estado em `/var/lib/guarda/estado.json`). Serviço systemd `guarda-energia` (root, para poder parar units e ler /sys; alertas vão ao usuário via DBUS) + modos `--test` (queda simulada: tela + Telegram rotulado 🧪, sem tocar em nada) e `--once`. Testes: 15 novos (debounce, os 4 eventos, prioridade queda>bateria-só, duração através de restart, parser de sessões, sudo×próprio-usuário, units sem root). Instalação no README (3 comandos sudo do dono + token copiado da placa). Bugs pegos pelos testes: reset do episódio "bateria-só" exigia tomada de volta por 2 ticks e f-string com expressão quebrada.
+
 ## [Unreleased] - 2026-11-02 (2)
 
 ### Added

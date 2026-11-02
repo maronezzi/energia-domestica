@@ -1,0 +1,20 @@
+[Unit]
+Description=Guarda de energia — PC sentinela da casa (energia-domestica)
+After=multi-user.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/guarda_energia.py
+Restart=on-failure
+RestartSec=10
+# root: para/religa as units pesadas (ollama) e lê /sys sem prós e contras;
+# os alertas de tela vão ao usuário logado via /run/user/UID/bus.
+User=root
+Environment=GUARDA_BOARD_URL=http://192.168.18.133:8050/api/status
+Environment=GUARDA_TOKEN_FILE=/etc/guarda/token
+Environment=GUARDA_CHAT=71802842
+Environment=GUARDA_UNITS=ollama.service
+
+[Install]
+WantedBy=multi-user.target

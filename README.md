@@ -92,6 +92,24 @@ Acesse em: **http://localhost:8050**
 
 ---
 
+## 🛡️ Guarda de energia no PC (sentinela de bateria)
+
+O PC de bateria que fica 24/7 vira **sentinela da casa**: quando a rede cai, o carregador dele desliga (`ADP1/online → 0`) e a placa sai do ar — a guarda confirma em ~30s, **alerta na tela** (notify-send crítico) e por **Telegram** (best-effort: o roteador morre junto; o alerta de VOLTA sai confiável), **para serviços pesados** (padrão: `ollama.service`) e reduz a própria cadência para poupar bateria. Carregador fora com a placa no ar ≠ falta (alguém desplugou o PC) — alerta só na tela. Aviso de bateria < 20% com a queda aberta. A volta da energia alerta com a duração e religa os serviços.
+
+Instalação no PC (rode com sudo — o serviço é do sistema):
+
+```bash
+TOKEN_PLACA=$(ssh root@192.168.18.133 'cat /etc/vigia/token')
+sudo install -Dm644 /dev/null /etc/guarda/token && echo "$TOKEN_PLACA" | sudo tee /etc/guarda/token >/dev/null
+sudo install -m755 deploy/guarda_energia.py /usr/local/bin/guarda_energia.py
+sudo install -m644 deploy/guarda-energia.service /etc/systemd/system/guarda-energia.service
+sudo systemctl daemon-reload && sudo systemctl enable --now guarda-energia
+```
+
+Teste sem instalar: `python3 deploy/guarda_energia.py --test` (simula uma queda: notifica na tela + Telegram rotulado 🧪, não toca em nada) e `--once` (classifica o momento). Config por env no `.service`: `GUARDA_UNITS` (lista a parar), `GUARDA_BOARD_URL`, `GUARDA_CHAT`. Estado em `/var/lib/guarda/estado.json` (a queda sobrevive a restart do guarda).
+
+---
+
 ## ⚙️ Configuração
 
 ### Primeira vez
