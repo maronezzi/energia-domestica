@@ -21,7 +21,7 @@ import os
 
 import tinytuya
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import uvicorn
 
 import byd_client  # poller BYD (thread própria; docs/ESTUDO_ABA_BYD.md)
@@ -4938,6 +4938,34 @@ def root():
         "version": "2.0-local-first",
         "message": "HTML page not found",
     }
+
+
+# ─── PWA (manifest + service worker + ícones) ─────────────────────
+# Rotas estáticas só: nada aqui muda comportamento do backend.
+# O sw.js só registra em contexto seguro (isSecureContext no index.html);
+# sobre HTTP LAN ele fica inert — para ativá-lo, servire HTTPS (ex.:
+# `tailscale serve`, documentado no README).
+
+PWA_ICONS = ("icon-512.png", "apple-touch-icon.png")
+
+
+@app.get("/manifest.json")
+def manifest_file():
+    return FileResponse(BASE_DIR / "src" / "manifest.json", media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def serviceworker():
+    # text/javascript (e não application/javascript) para o Chrome aceitar o registro.
+    return FileResponse(BASE_DIR / "src" / "sw.js", media_type="text/javascript")
+
+
+@app.get("/icons/{name}")
+def pwa_icon(name: str):
+    # Whitelist: só os PNGs gerados para o PWA (Path traversal fica fora).
+    if name not in PWA_ICONS:
+        raise HTTPException(status_code=404)
+    return FileResponse(BASE_DIR / "src" / "icons" / name, media_type="image/png")
 
 
 class _StampedStdout:

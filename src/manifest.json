@@ -1,0 +1,15 @@
+{
+  "name": "Energia Doméstica",
+  "short_name": "Energia",
+  "description": "Monitoramento de energia da casa e do carro — 100% local",
+  "lang": "pt-BR",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a0e14",
+  "theme_color": "#0a0e14",
+  "icons": [
+    {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "/icons/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"}
+  ]
+}

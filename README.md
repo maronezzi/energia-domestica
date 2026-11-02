@@ -159,6 +159,41 @@ Configurável em `data/tuya_config.json`:
 
 ---
 
+## 📱 App (PWA)
+
+O dashboard é uma **PWA instalável**: ícone na tela inicial do celular, abre em tela cheia (sem barra de navegador) e funciona offline com o shell em cache (o service worker guarda o HTML, os ícones e o Chart.js/Leaflet do CDN; os dados `/api/*` sempre vêm da rede — dado fresco vence cache).
+
+### Instalar no iPhone (funciona já, por HTTP)
+
+1. Abra `http://<ip-da-placa>:8050` no Safari.
+2. Botão **Compartilhar** → **Adicionar à Tela de Início**.
+3. O app abre standalone (tela cheia, sem barra do Safari).
+
+### Instalar no Android
+
+1. Abra `http://<ip-da-placa>:8050` no Chrome.
+2. Menu ⋮ → **Adicionar à tela inicial**.
+3. O ícone abre o dashboard; o modo standalone completo (e o cache offline) exigem **HTTPS** — veja abaixo.
+
+### HTTPS para o Android ficar completo (opcional)
+
+Service worker e modo standalone do Android exigem contexto seguro. A placa já tem Tailscale — basta um comando:
+
+```bash
+# na placa (uma vez; https://<nome-da-placa>.<sua-rede>.ts.net passa a servir o 8050)
+tailscale serve --bg 8050
+```
+
+Depois instale a partir de `https://<nome>.<rede>.ts.net` no celular (com o Tailscale do celular ligado). Sem HTTPS o PWA continua funcionando como acima — o service worker simplesmente não registra (o código tem guarda `isSecureContext` e fica inert; nada quebra).
+
+### Como o cache funciona
+
+- `/api/*` **nunca** é cacheado (dados sempre frescos); POSTs de controle (iniciar/parar carga, config) nunca são interceptados.
+- Navegação é **network-first**: depois de um deploy, o shell novo chega no primeiro reload — não há versão presa em cache.
+- Para forçar atualização completa no celular: reabra o app; se algo estranho persistir, limpar dados do site no navegador.
+
+---
+
 ## 🐛 Troubleshooting
 
 ### "no_balance_alarm" ao iniciar carga

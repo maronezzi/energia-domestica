@@ -2,8 +2,16 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>⚡ Energia Doméstica</title>
+    <!-- PWA: instalável (manifest) + standalone no iOS (metas apple-*) -->
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#0a0e14">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Energia">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js"></script>
@@ -31,6 +39,7 @@
 
         .tabs{display:flex;gap:.3rem;margin-bottom:1.5rem;border-bottom:1px solid var(--border);padding-bottom:.5rem}
         .tab{padding:.6rem 1.2rem;border-radius:8px 8px 0 0;border:none;background:transparent;color:var(--dim);cursor:pointer;font-size:.9rem;font-weight:500;transition:all .2s}
+        .tab-short{display:none} /* rótulo curto só na barra inferior mobile */
         .tab:hover{color:var(--text);background:var(--card)}
         .tab.active{background:var(--card);color:var(--accent);border-bottom:2px solid var(--accent)}
         .tab-content{display:none}.tab-content.active{display:block}
@@ -290,7 +299,25 @@
             .phases-grid,.charts-grid{grid-template-columns:1fr}
             .summary{grid-template-columns:repeat(2,1fr)}
         }
-        @media(max-width:600px){main{padding:1rem}header{padding:.8rem 1rem}.logo-sub{display:none}}
+        @media(max-width:600px){
+            main{padding:.9rem .8rem calc(4.4rem + env(safe-area-inset-bottom))}
+            header{padding:.6rem .8rem;gap:.6rem}
+            .logo-sub{display:none}
+            .last-update{display:none}
+            .header-right{gap:.7rem}
+            /* Barra de abas vira navegação inferior fixa (markup intacto — só CSS) */
+            .tabs{position:fixed;left:0;right:0;bottom:0;z-index:100;margin:0;
+                  border-bottom:none;border-top:1px solid var(--border);
+                  background:rgba(17,22,32,.97);backdrop-filter:blur(8px);
+                  padding:.3rem .2rem calc(.3rem + env(safe-area-inset-bottom));
+                  justify-content:space-between;gap:.1rem}
+            .tab{flex:1 1 0;min-width:0;padding:.4rem .1rem;border-radius:10px;
+                 font-size:.6rem;line-height:1.3;text-align:center;white-space:normal}
+            .tab.active{border-radius:10px}
+            .tab-long{display:none}.tab-short{display:inline}
+            /* 2 cards de EV lado a lado não cabem em tela de celular — empilha */
+            .ev-cards-row{grid-template-columns:1fr}
+        }
     </style>
 </head>
 <body>
@@ -313,7 +340,7 @@
 <div class="tabs">
     <button class="tab active" onclick="showTab('dashboard')">📊 Dashboard</button>
     <button class="tab" onclick="showTab('history')">📈 Histórico</button>
-    <button class="tab" onclick="showTab('charges')">🔌 Carregamentos</button>
+    <button class="tab" onclick="showTab('charges')">🔌 <span class="tab-long">Carregamentos</span><span class="tab-short">Cargas</span></button>
     <button class="tab" onclick="showTab('byd')">🚗 Carro</button>
     <button class="tab" onclick="showTab('rede')">⚡ Rede</button>
     <button class="tab" onclick="showTab('settings')">⚙️ Config</button>
@@ -993,6 +1020,7 @@ function showTab(n) {
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     document.querySelector(`.tab[onclick*="${n}"]`).classList.add('active');
     document.getElementById('tab-' + n).classList.add('active');
+    window.scrollTo({top: 0}); // barra inferior mobile: cada aba começa do topo
     if (n === 'history') loadHistory();
     if (n === 'byd') loadByd();
     if (n === 'rede') loadRede();
@@ -2725,6 +2753,15 @@ setInterval(() => {
         refreshChargeState();
     }
 }, 2000);
+</script>
+<script>
+// PWA: registra o service worker só em contexto seguro (localhost/HTTPS).
+// Sobre HTTP LAN (placa) fica inert — ativa quando houver HTTPS (ex.: tailscale serve).
+if ('serviceWorker' in navigator && window.isSecureContext) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+}
 </script>
 </body>
 </html>

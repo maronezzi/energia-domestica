@@ -1,26 +1,40 @@
-# PLAN — Tensão do carro (220 V) na aba Rede + botão "Atualizar dados" (rev. 2 pós-crítica)
+# PLAN — PWA instalável sobre o dashboard existente (rev. 2 pós-crítica)
 
-**Meta:** na aba ⚡ Rede, dar à tensão do disjuntor do carro (220 V) o mesmo tratamento da casa (127 V) — card ao vivo e analisador diário por faixas ANEEL — e um botão "Atualizar" no topo que força coleta de tudo (medidores Tuya + BYD).
+**Meta:** transformar o dashboard web em PWA instalável servida pelo FastAPI na cubie2 — manifest + service worker (cache do shell) + layout mobile-first com barra de abas inferior — sem backend novo além de rotas estáticas e sem mudar comportamento de produção.
 
-**Decisões da crítica (subagente, 8 achados):**
-- SEM watcher ao vivo do carro e SEM coluna `outages.circuit`: com 21% de leituras válidas no DPS 6, eventos ao vivo do carro seriam inertes e a fusão/migration trazia 3 achados graves. Tabela de eventos continua referenciada à casa (apagões já são da casa). Nota na UI explica.
-- `POST /api/refresh` NÃO limpa `_ttl_cache` (power_quality 300s = ~10s de CPU por clique na placa; single-flight recompute empilhado documentado). Agregados seguem seus TTLs.
-- Sinalização do poller BYD: `asyncio.Event` + `loop.call_soon_threadsafe` (sem executor — threads não-daemon atrasariam o shutdown).
-- Migration/circuito, fusão cross-circuito, eventos órfãos no startup: eliminados pela decisão 1.
+**Restrições:**
+- Só APIs locais da placa; o app nunca fala com a nuvem BYD direto (1 sessão/conta).
+- NUNCA rodar `src/dashboard.py` completo no PC (logaria no BYD e derrubaria a sessão da placa) — verificação visual via stub uvicorn em `/tmp` com JSON sintético.
+- Convenções do QWEN.md: UI em pt-BR, commits em inglês (`feat:`), sem deps novas no backend. PIL = dependência só de dev no PC (ícones PNG commitados; a placa nunca importa PIL).
+
+**Decisões da crítica (subagente):**
+- Precache do SW **não-atômico** (`Promise.allSettled` com `cache.add()` individual): um CDN fora do ar não pode falhar o install (cache.addAll é atômico).
+- Fetch handler: **não-GET nunca interceptado** (POSTs start/stop-charge, config, eventos); `/api/*` sempre rede; tiles OSM fora do SW; navegação **network-first** (deploy atualiza o shell sem bump manual de versão).
+- Markup das abas **intacto** — CSS-only transforma `.tabs` em barra inferior; `showTab` (index.html:994 usa `.tab[onclick*=...]`) só ganha scrollTo.
+- Ícones: só 2 PNGs (512 "any" + apple-touch 180) — maskable cortado.
+- `FileResponse` precisa de import novo (HTTPException já existe, dashboard.py:23).
+- rsync copia `src/icons/` (nada nos excludes pega) e `.gitignore` não engole os PNGs — verificado pelo crítico.
+- sw.js mantido (inerte sobre HTTP LAN hoje; vivo no dia em que HTTPS for ligado). `tailscale serve` fica documentado no README como caminho para ativá-lo — NÃO executado agora.
 
 ## Passos
 
-1. **`/api/power_quality` ganha seção `car`**: segunda agregação SQL (`phase_a > 50`, GROUP BY dia) com bandas 220 de `_ANEEL_ZONES`; config `grid_car_nominal_v: 220` (+ whitelist/range no POST /api/config). Teste com leitura 0.0 no meio (não pode sujar min/max).
-   - Check: `pytest tests/test_rede.py::TestApis` verde com asserts novos do `car`. ✅ **21 passed** (2026-11-02)
+1. **Camada estática PWA (rotas + arquivos + testes)** — no dashboard.py: `GET /manifest.json`, `GET /sw.js`, `GET /icons/{name}` (whitelist {icon-512.png, apple-touch-icon.png}, 404 fora dela) com `FileResponse` (import novo). Arquivos: `src/manifest.json` (standalone, theme `#0a0e14`, start_url `/`, ícones 512+180), `src/sw.js` (v1: precache não-atômico do shell + CDN Chart.js/Leaflet; CDNs cache-first; `/api/*` e não-GET passthrough; OSM fora; navegação network-first; activate limpa caches antigos), `src/icons/` gerados com PIL (gradiente teal→azul, raio branco; apple-touch 180 quadrado full-bleed — iOS arredonda sozinho). *Merge dos passos 1+2 da rev.1: rotas sem arquivos falham no teste (FileResponse lança com path inexistente) — um deliverable, um check.*
+   - Check: `pytest tests/test_pwa.py` verde (rotas chamadas direto, padrão do repo; manifest JSON válido apontando p/ arquivos existentes; sw.js intercepta só GET; PNGs com magic bytes). ✅ **7 passed; ícones gerados e inspecionados** (2026-11-02)
 
-2. **Frontend aba Rede**: card "🚗 Tensão do carro" (valor ao vivo de /api/status + zona 220); segundo gráfico `cVoltCar` (mín–máx diário, linhas ANEEL 202/231, tooltip com nº de amostras); nota explicando que eventos ao vivo ficam na casa.
-   - Check: `node --check` + screenshot com uvicorn local (porta 8051) mostrando o gráfico do carro. ✅ **6 dias renderizados (211–227 V, banda azul, seed sintético na cópia local)** (2026-11-02)
+2. **Head do index.html + registro do SW** — link manifest, `theme-color`, `viewport-fit=cover`, metas iOS (`apple-mobile-web-app-capable`, `black-translucent`, título, apple-touch-icon); registro do SW guardado por `'serviceWorker' in navigator && window.isSecureContext` no load.
+   - Check: stub `/tmp` + browser (control-browser) em `http://localhost:8052` (8051 ocupado por stub da sessão anterior): SW **ativo** no scope `/`, manifest + metas iOS na DOM, cache `energia-shell-v1` com os 7 assets do shell (CDNs inclusos), página controlada pelo SW, **0 erros** em 2,5s de polls. (2026-11-02)
 
-3. **byd_client: coleta sob demanda** — `asyncio.Event` + `loop.call_soon_threadsafe` (loop capturado no `_run_loop`); `_sleep_or_force()` substitui os 2 sleeps interruptíveis (normal + erro); backoff de auth permanece cego; `request_poll_now()` público (False se poller morto).
-   - Check: `pytest tests/test_byd_refresh.py` (força interrompe sleep de 30s em <5s; sem loop → False; poller morto → False). ✅ **5 passed** (2026-11-02)
+3. **CSS/JS mobile-first** — ≤600px: `.tabs` vira barra fixa inferior (flex, safe-area-inset-bottom, fundo com blur), `main` ganha padding-bottom, header compacto (esconde `.last-update`); desktop intocado. `showTab()` rola ao topo.
+   - Check: screenshots no browser em 390px (barra inferior visível e funcional) e 1280px (idêntico ao antes). ✅ **390px: barra fixed com "Cargas" (rótulo curto), cards EV empilhados (bug de overflow do .ev-cards-row corrigido), toque real na aba Carro funciona (via coordenada — actionability do Playwright trava em fixed, hit-test provado), scroll ao topo; 1280px: layout original idêntico, abas estáticas no topo** (2026-11-02)
 
-4. **`POST /api/refresh` + botão no header** — re-lê os 2 medidores (padrão api_breaker_on), pede poll BYD, SEM limpar TTL (docstring explica); botão `🔄 Atualizar` no `.header-right` com ⏳/✅/❌ + recarga dos loaders ativos.
-   - Check: `pytest tests/test_byd_refresh.py` (endpoint com leituras mockadas; request_poll_now chamado) + `node --check`. ✅ **7 passed; JS/py OK** (2026-11-02)
+4. **Suite + Lighthouse** — `pytest tests/` 100%; `npx lighthouse --only-audits=installable-manifest,service-worker` contra o stub localhost (Chrome+npx já verificados no PC; fallback: checklist manual dos critérios de install via browser).
+   - Check: suite verde + evidência do Lighthouse (ou checklist manual documentada). ✅ **195 passed. Lighthouse 12 REMOVEU os audits de PWA (`--list-audits` sem nenhum match; o JSON saiu com 0 audits) — fallback do plano executado e mais forte: morte do stub + reload = página abre pelo cache do SW com Chart.js e Leaflet carregados do cache do CDN, badge "Offline" no header** (2026-11-02)
 
-5. **Suite completa + docs + deploy + verificação ao vivo** — pytest 100%, CHANGELOG/README, deploy_cubie.sh, `curl /api/power_quality` (seção car na placa), clique no botão ao vivo (BYD `data_age_s` cai; loaders recarregam), screenshots.
-   - Check: suite verde + evidências da placa + browser ao vivo. ✅ **188 passed; deploy FORCE=1 (guarda de carga — carro carregando, endurecimento 31/10 cobre); placa: 31 dias de barras do carro, card 213,0 V, BYD data_age 57s→7s no clique** (2026-11-02)
+5. **Docs** — README ganha seção "📱 App (PWA)": iOS (Compartilhar → Adicionar à Tela de Início, standalone total já em HTTP), Android (menu → Adicionar à tela inicial; standalone completo + SW exigem HTTPS → `tailscale serve` na placa, um comando, caminho futuro), CHANGELOG com data.
+   - Check: leitura das duas docs — passos claros e caveat HTTPS explícito.
+
+6. **Commit + push** — um commit `feat: installable PWA (manifest, service worker, mobile bottom nav)`.
+   - Check: `git log -1` + push sem erro.
+
+7. **Deploy + verificação na placa** — `./deploy_cubie.sh` (guarda de carga embutida); na placa: `curl` de `/manifest.json`, `/sw.js` e ícones = 200; browser apontando para a placa carrega o dashboard e a barra inferior funciona.
+   - Check: evidências curl (status + content-type) + screenshot ao vivo da placa.
