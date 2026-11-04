@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-11-03
+
+### Fixed
+- 🚗 **Rastreio do carro: volta desenhada "bem distante" + viagens-fantasma de 1 km no diário de bordo** — diagnóstico com os dados de 03/11: a ida (07:04–07:48) saiu quase perfeita porque o painel aberto no celular apertou o botão Atualizar 292 vezes (coleta a cada ~9 s); a volta dependeu só do poller de fundo, e uma ÚNICA leitura de speed ≤1,5 km/h às 17:56:29 declarou "carro parado" — poller dormiu 15 min (GPS só a cada 4 ciclos idle), o carro ainda rodou ~24 min, e o mapa ligou o trabalho direto em casa. Além disso, 2 ciclos parados fechavam a viagem em ~20 s com o poll martelado: a ida de 19 km virou **8 viagens** de 1–5 km, e o odômetro INTEIRO da BYD (só anda de 1 em 1 km) ticando com o carro parado gerava viagens-fantasma de exatamente 1,00 km (31/10 18:56 "saiu de casa · chegou em casa"). Correções no `byd_client`: **histerese de parada** (`MOVING_STILL_STREAK=2` — uma leitura lenta não declara parado); **sonda de retomada pelo odômetro** (`_moving_decision` — odo avançou ≥ TRIP_MIN_KM desde a âncora parada = carro andou mesmo com speed mentindo: vira movimento, pega fix de GPS na hora e consome a âncora para não re-disparar); **piso de fechamento** (`TRIP_END_MIN_S=180` — parado há menos de 3 min não fecha viagem; end_ts fica no último ciclo em movimento); **pós-movimento curto** (`POST_MOVE_POLLS=4` a 300 s antes de dormir — retomada pega em 5 min e não em 15); **GPS a cada ciclo em movimento** (`GPS_EVERY_MOVING=1` — ponto a cada 60 s sem depender do botão); **guarda anti-fantasma** (início e fim <400 m com km<2 = ruído do odômetro, descartada); a "reconstrução" de viagens invisíveis virou a própria sonda (mesmo km, agora com ts/GPS reais de fim); speed do GPS cai pro snapshot quando a T-Box não traz. Viagens-fantasma/fragmentos existentes na placa: merge das cadeias adjacentes (≤5 min) + descarte das ≤1,0 km, com backup do DB. Testes: 5 novos + 2 atualizados (215 no total).
+
 ## [Unreleased] - 2026-11-02 (3)
 
 ### Added

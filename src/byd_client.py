@@ -33,8 +33,13 @@ POLL_MOVING = 60      # carro em movimento (base do diário de bordo, fase 2)
 POLL_CHARGING = 60    # carregando
 POLL_IDLE = 900       # parado: 15 min
 POLL_JITTER = 120     # ±2 min só no idle (evita padrão mecânico)
-GPS_EVERY_MOVING = 2  # gps a cada N ciclos em movimento
+GPS_EVERY_MOVING = 1  # gps a cada ciclo em movimento (ponto a cada 60 s)
 GPS_EVERY_STILL = 4
+POST_MOVE_POLLS = 4        # após dirigir, N polls curtos antes de dormir
+POST_MOVE_INTERVAL = 300   # poll pós-movimento: 5 min (pega retomada cedo)
+MOVING_STILL_STREAK = 2    # leituras lentas seguidas para declarar parado
+TRIP_END_MIN_S = 180       # parado há menos disso não fecha viagem (semáforo)
+PHANTOM_RADIUS_M = 400     # início=fim <400 m com km<2 → ruído do odômetro
 BACKOFF_MIN = 30
 BACKOFF_MAX = 1800
 SESSION_COURTESY_S = 600  # token rejeitado: segura o re-login 10 min (o dono usa o app)
@@ -393,8 +398,38 @@ def _maybe_learn_home():
 _trip: dict | None = None
 _trip_still = 0
 _last_still_odo = None  # último odo lido com o carro parado (âncora de abertura)
-_last_still_ts = None   # e o ts/soc desse ciclo (para reconstruir viagem invisível)
+_last_still_ts = None   # e o ts/soc desse ciclo (para ancorar a viagem)
 _last_still_soc = None
+_last_still_point = None  # último fix de GPS visto parado (lugar de onde saiu)
+_still_streak = 0       # leituras ≤1,5 km/h seguidas (histerese de parada)
+
+
+def _moving_decision(raw_moving: bool, odo: float | None) -> tuple[bool, bool]:
+    """(moving efetivo, sonda). Duas salvaguardas contra o speed da BYD,
+    que chega defasado/zero com a T-Box meio adormecida:
+
+    1. Histerese: UMA leitura ≤1,5 km/h não declara o carro parado (semáforo,
+       curva lenta, leitura velha) — só MOVING_STILL_STREAK seguidas. Com o
+       poll martelado pelo botão Atualizar (03/11: coleta a cada ~9 s),
+       2 ciclos parados de 20 s partiam a ida em 8 viagens de 1–5 km.
+    2. Sonda: odômetro avançou ≥ TRIP_MIN_KM desde a última âncora parada →
+       o carro andou mesmo com o speed mentindo (03/11 17:56: uma leitura
+       baixa derrubou o rastreio por 24 min e o mapa ligou o trabalho
+       direto em casa). A sonda é consumida pelo loop após _update_trip."""
+    global _still_streak
+    if (
+        not raw_moving
+        and odo is not None and odo > 0
+        and _last_still_odo is not None
+        and odo - _last_still_odo >= TRIP_MIN_KM
+    ):
+        _still_streak = 0
+        return True, True
+    if raw_moving:
+        _still_streak = 0
+        return True, False
+    _still_streak += 1
+    return _still_streak < MOVING_STILL_STREAK, False
 
 
 def _trip_distance_home(point, conn):
@@ -407,8 +442,23 @@ def _trip_distance_home(point, conn):
 
 
 def _insert_trip(conn, trip: dict, note: str = "viagem"):
-    """Grava uma viagem fechada (real ou reconstruída) em byd_trips."""
+    """Grava uma viagem fechada (real ou ancorada pela sonda) em byd_trips."""
     km = (trip.get("end_odo") or 0) - (trip.get("start_odo") or 0)
+    # guarda anti-fantasma: o odômetro da BYD é inteiro e às vezes tica +1 com
+    # o carro parado (31/10 18:56: 1 km "saiu de casa · chegou em casa").
+    # Início e fim no mesmo lugar com < 2 km é ruído, não deslocamento.
+    sp, ep = trip.get("start_point"), trip.get("end_point")
+    if (
+        km < 2.0
+        and sp and ep
+        and sp.get("lat") is not None and ep.get("lat") is not None
+        and haversine_m(sp["lat"], sp["lon"], ep["lat"], ep["lon"]) < PHANTOM_RADIUS_M
+    ):
+        print(
+            f"BYD: descartada viagem de {km:.1f} km (início e fim no mesmo "
+            f"lugar, <{PHANTOM_RADIUS_M} m — ruído do odômetro)"
+        )
+        return
     r = _home_radius(conn)
     d_start = _trip_distance_home(trip.get("start_point"), conn)
     d_end = _trip_distance_home(trip.get("end_point"), conn)
@@ -440,45 +490,23 @@ def _insert_trip(conn, trip: dict, note: str = "viagem"):
 
 
 def _update_trip(snap: dict, pos: dict | None, moving: bool):
-    """Máquina de viagens: abre em movimento, fecha após 2 ciclos parado.
+    """Máquina de viagens: abre em movimento, fecha após 2 ciclos parado E
+    ≥ TRIP_END_MIN_S parado (semáforo com poll martelado não parte a viagem
+    em micro-trechos — 03/11: 19 km viraram 8 viagens de 1–5 km).
     km vem do Δodômetro (confiável); GPS só contextualiza início/fim.
     O início é ancorado no ÚLTIMO odo lido PARADO: o trecho dirigido antes
     de o speed chegar defasado pela BYD não se perde (a soma das viagens
     passa a fechar com o Δodômetro do dia — antes 31 km viravam 28).
-    E se o odômetro AVANÇAR entre dois ciclos parados (nenhum poll pegou o
-    carro em movimento — os 3 percursos de 24/10), a viagem é RECONSTRUÍDA
-    dos dois extremos: km exatos, horário aproximado, sem trajeto."""
+    A retomada invisível (carro andou sem NENHUM poll pegando speed > 1,5 —
+    a BYD manda speed 0/defasado com a T-Box dormindo, os 3 percursos de
+    24/10) é detectada pela SONDA no loop (_moving_decision): odômetro
+    avançou desde a âncora parada → vira movimento, e esta função abre a
+    viagem ancorada no odo parado anterior, com fim real (ts/GPS do ciclo)."""
     global _trip, _trip_still, _last_still_odo, _last_still_ts, _last_still_soc
+    global _last_still_point
     odo = snap.get("odo_km")
     if odo is None or odo <= 0:
         return  # odo_km = 0 é sentinela da BYD, não é leitura
-    if not moving:
-        # reconstrução: dirigiu entre dois ciclos parados sem nenhum poll
-        # pegando speed > 1,5 (viagem "invisível" para a máquina de estados)
-        if (
-            _trip is None
-            and _last_still_odo
-            and odo - _last_still_odo >= TRIP_MIN_KM
-        ):
-            conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-            try:
-                _insert_trip(
-                    conn,
-                    {
-                        "start_ts": _last_still_ts or snap["ts"],
-                        "end_ts": snap["ts"],
-                        "start_odo": _last_still_odo, "end_odo": odo,
-                        "soc_start": _last_still_soc, "soc_end": snap.get("soc"),
-                        "start_point": None, "end_point": None,
-                    },
-                    note="viagem reconstruída (odo entre polls)",
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        _last_still_odo = odo
-        _last_still_ts = snap["ts"]
-        _last_still_soc = snap.get("soc")
     if moving:
         _trip_still = 0
         point = {"lat": pos["lat"], "lon": pos["lon"]} if pos else None
@@ -487,7 +515,10 @@ def _update_trip(snap: dict, pos: dict | None, moving: bool):
                 "start_ts": _last_still_ts or snap["ts"],
                 "start_odo": _last_still_odo if _last_still_odo else odo,
                 "soc_start": _last_still_soc or snap.get("soc"),
-                "start_point": point, "end_point": point,
+                # partida: o último fix visto parado (de onde saiu); sem fix
+                # parado, o primeiro fix em movimento
+                "start_point": point or _last_still_point,
+                "end_point": point or _last_still_point,
                 "end_ts": snap["ts"], "end_odo": odo,
                 "soc_end": snap.get("soc"),
             }
@@ -498,19 +529,28 @@ def _update_trip(snap: dict, pos: dict | None, moving: bool):
             if point:
                 _trip["end_point"] = point
         return
+    if pos:
+        _last_still_point = {"lat": pos["lat"], "lon": pos["lon"]}
+    _last_still_odo = odo
+    _last_still_ts = snap["ts"]
+    _last_still_soc = snap.get("soc")
     if _trip is None:
         return
     _trip_still += 1
     if _trip_still < TRIP_END_STILL_CYCLES:
         return
-    trip, _trip, _trip_still = _trip, None, 0
+    trip = _trip
+    if snap["ts"] - trip["end_ts"] < TRIP_END_MIN_S:
+        return  # parado há menos de 3 min: semáforo/balança, não fecha
+    _trip, _trip_still = None, 0
     # Corrida do fechamento: o trecho dirigido entre o 1º e o 2º ciclo parado
     # (nenhum poll pegou speed — cadência idle de 15 min) não atualizou o
     # end_odo, e a âncora _last_still_odo já foi reescrita neste ciclo — o km
-    # escaparia da viagem E da reconstrução (7 de 60 km em 25-27/10). O trecho
-    # pertence a ESTA viagem: estende o fim até o odômetro atual.
+    # escaparia da viagem E da sonda (7 de 60 km em 25-27/10). O trecho
+    # pertence a ESTA viagem: estende o fim até o odômetro atual. O end_ts
+    # fica no último ciclo em movimento (quando o carro parou de verdade).
     if odo - (trip.get("end_odo") or 0) >= TRIP_MIN_KM:
-        trip.update(end_ts=snap["ts"], end_odo=odo, soc_end=snap.get("soc"))
+        trip.update(end_odo=odo, soc_end=snap.get("soc"))
         if pos:
             trip["end_point"] = {"lat": pos["lat"], "lon": pos["lon"]}
     km = (trip["end_odo"] or 0) - (trip["start_odo"] or 0)
@@ -1119,6 +1159,26 @@ def _courtesy_reauth(client) -> dict | None:
     return state
 
 
+async def _gps_fix(client, vin: str, snap: dict) -> dict | None:
+    """Um fix de GPS da T-Box já filtrado (Ilha Nula e saltos impossíveis)."""
+    gps = await client.get_gps_info(vin)
+    pos = {
+        "ts": snap["ts"],
+        "gps_ts": _dt_epoch(getattr(gps, "gps_timestamp", None)),
+        "lat": _f(getattr(gps, "latitude", None)),
+        "lon": _f(getattr(gps, "longitude", None)),
+        "speed": _f(getattr(gps, "speed", None)),
+        "heading": _f(getattr(gps, "direction", None)),
+        "odo_km": snap["odo_km"],
+    }
+    if pos["speed"] is None:
+        pos["speed"] = snap.get("speed")  # GPS da BYD às vezes não traz speed
+    if not _gps_plausible(pos):
+        print("BYD: posição de GPS descartada (fix inválido ou salto impossível)")
+        return None
+    return pos
+
+
 async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
     """Um ciclo de coleta. Retorna (snapshot, pos|None, moving)."""
     rt = await client.get_vehicle_realtime(vin)
@@ -1163,19 +1223,7 @@ async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
     every = GPS_EVERY_MOVING if moving else GPS_EVERY_STILL
     pos = None
     if gps_i % every == 0 or (moving != moving_prev):
-        gps = await client.get_gps_info(vin)
-        pos = {
-            "ts": now,
-            "gps_ts": _dt_epoch(getattr(gps, "gps_timestamp", None)),
-            "lat": _f(getattr(gps, "latitude", None)),
-            "lon": _f(getattr(gps, "longitude", None)),
-            "speed": _f(getattr(gps, "speed", None)),
-            "heading": _f(getattr(gps, "direction", None)),
-            "odo_km": snap["odo_km"],
-        }
-        if not _gps_plausible(pos):
-            print("BYD: posição de GPS descartada (fix inválido ou salto impossível)")
-            pos = None
+        pos = await _gps_fix(client, vin, snap)
     return snap, pos, moving
 
 
@@ -1193,11 +1241,16 @@ def _dashboard_charging() -> bool:
         return False
 
 
-def _next_interval(snap: dict, moving: bool) -> float:
+def _next_interval(snap: dict, moving: bool, cycles_since_moving: int = 0) -> float:
     if moving:
         return POLL_MOVING
     if snap.get("is_charging") or _dashboard_charging():
         return POLL_CHARGING
+    if cycles_since_moving <= POST_MOVE_POLLS:
+        # acabou de rodar: sondagem curta antes de dormir — se o speed veio
+        # errado, a retomada é pega em 5 min e não em 15 (03/11 17:56: uma
+        # leitura baixa cegou o rastreio por 24 min)
+        return POST_MOVE_INTERVAL
     return POLL_IDLE + random.uniform(-POLL_JITTER, POLL_JITTER)
 
 
@@ -1247,10 +1300,11 @@ async def _run_loop():
 
                 gps_i = 0
                 moving_prev = False
+                cycles_since_moving = 999
                 while True:
                     t0 = time.monotonic()
                     try:
-                        snap, pos, moving = await _collect(
+                        snap, pos, raw_moving = await _collect(
                             client, vin, gps_i, moving_prev
                         )
                     except asyncio.CancelledError:
@@ -1263,6 +1317,12 @@ async def _run_loop():
                             _st["last_error"] = str(e)
                         await _sleep_or_force(POLL_CHARGING)
                         continue
+                    # speed da BYD mente (defasado/zero com a T-Box dormindo):
+                    # histerese de parada + sonda de retomada pelo odômetro
+                    odo_now = snap.get("odo_km")
+                    moving, sonda = _moving_decision(raw_moving, odo_now)
+                    if sonda and pos is None:
+                        pos = await _gps_fix(client, vin, snap)
                     # coleta OK: sessão provada (cortesia armada) e tokens
                     # novos — de re-login interno do pybyd — são persistidos
                     if _reauth_state is not None:
@@ -1299,10 +1359,29 @@ async def _run_loop():
                             last_ok_ts=snap["ts"], last_error=save_err,
                             last_attempt_ts=snap["ts"],
                         )
-                    if moving != moving_prev:
+                    if sonda and odo_now is not None and _last_still_odo is not None:
+                        print(
+                            "BYD: sonda de retomada: odômetro "
+                            f"+{odo_now - _last_still_odo:.0f} km com speed ≤1,5 "
+                            "— carro em movimento, rastreando"
+                        )
+                        # consome o avanço: sem isso a sonda re-dispararia a
+                        # cada ciclo parado e a viagem nunca fecharia
+                        _last_still_odo = odo_now
+                        _last_still_ts = snap["ts"]
+                        _last_still_soc = snap.get("soc")
+                    elif moving != moving_prev:
                         print(f"BYD: carro {'em movimento' if moving else 'parado'}")
                     moving_prev = moving
-                    interval = max(5, _next_interval(snap, moving) - (time.monotonic() - t0))
+                    if moving:
+                        cycles_since_moving = 0
+                    else:
+                        cycles_since_moving += 1
+                    interval = max(
+                        5,
+                        _next_interval(snap, moving, cycles_since_moving)
+                        - (time.monotonic() - t0),
+                    )
                     if await _sleep_or_force(interval):
                         print("BYD: coleta sob demanda (botão Atualizar)")
         except asyncio.CancelledError:

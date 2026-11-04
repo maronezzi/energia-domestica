@@ -43,12 +43,14 @@ class TripTestBase(unittest.TestCase):
         if bc.DB_FILE.exists():
             bc.DB_FILE.unlink()
         bc.init_db()
-        # estado global da máquina de viagens
+        # estado global da máquina de viagens + histerese
         self._g = {}
-        for g in ("_trip", "_trip_still", "_last_still_odo", "_last_still_ts", "_last_still_soc"):
+        for g in ("_trip", "_trip_still", "_last_still_odo", "_last_still_ts",
+                  "_last_still_soc", "_last_still_point", "_still_streak"):
             self._g[g] = getattr(bc, g)
             setattr(bc, g, None)
         bc._trip_still = 0
+        bc._still_streak = 0
 
     def tearDown(self):
         bc.DB_FILE = self._orig_db
@@ -83,7 +85,9 @@ class TestTripClosingRace(TripTestBase):
         start_odo, end_odo, soc_end, end_ts = trips[0]
         self.assertEqual(start_odo, 100.0)
         self.assertEqual(end_odo, 110.0, "trecho do fechamento tem que entrar na viagem")
-        self.assertEqual(end_ts, 1300)
+        # end_ts fica no último ciclo EM MOVIMENTO (quando o carro parou de
+        # verdade), não no poll de fechamento (que pode ser 15 min depois)
+        self.assertEqual(end_ts, 1060)
 
     def test_normal_close_unchanged(self):
         bc._update_trip(self._snap(100.0, 1000), None, True)
@@ -104,14 +108,99 @@ class TestTripClosingRace(TripTestBase):
         self.assertEqual(len(trips), 1)
         self.assertEqual(trips[0][1], 104.0)
 
-    def test_reconstruction_without_trip_unchanged(self):
-        # sem viagem aberta: avanço de odo entre ciclos parados continua
-        # virando viagem reconstruída (fix ce874f1 intacto)
-        bc._update_trip(self._snap(100.0, 1000), None, False)
-        bc._update_trip(self._snap(105.0, 1300), None, False)
+    def test_sonda_opens_anchored_trip_when_speed_blind(self):
+        # fix ce874f1 evoluído: a "reconstrução" virou SONDA no loop — o mesmo
+        # avanço de odo entre ciclos parados agora vira movimento (com fix de
+        # GPS e cadência de movimento) e a viagem abre ancorada no odo parado
+        # anterior, com fim real (ts do último ciclo em movimento)
+        bc._update_trip(self._snap(100.0, 1000), None, False)   # âncora parada
+        moving, sonda = bc._moving_decision(False, 105.0)       # odo +5, speed ≤1,5
+        self.assertEqual((moving, sonda), (True, True))
+        bc._update_trip(self._snap(105.0, 1300), None, moving)  # abre ancorada
+        # o loop consome a âncora após _update_trip (senão re-dispararia)
+        bc._last_still_odo = 105.0
+        bc._update_trip(self._snap(105.0, 1360), None, False)   # still #1
+        bc._update_trip(self._snap(105.0, 2620), None, False)   # still #2 + piso: fecha
         trips = self._trips()
         self.assertEqual(len(trips), 1)
         self.assertEqual((trips[0][0], trips[0][1]), (100.0, 105.0))
+
+
+class TestHistereseEFantasma(TripTestBase):
+    """Regressão do dia 03/11: ida de 19 km partida em 8 viagens (poll
+    martelado + 2 ciclos parados de 20 s) e viagens-fantasma de 1 km do
+    odômetro inteiro ticando com o carro parado."""
+
+    def test_one_slow_read_does_not_declare_still(self):
+        # histerese: 1 leitura ≤1,5 km/h não é "parado" (semáforo/leitura velha)
+        self.assertEqual(bc._moving_decision(True, 100.0), (True, False))
+        self.assertEqual(bc._moving_decision(False, 100.0), (True, False))
+        self.assertEqual(bc._moving_decision(False, 100.0), (False, False))
+        # e um speed alto volta a movimento imediatamente
+        self.assertEqual(bc._moving_decision(True, 100.0), (True, False))
+
+    def test_sonda_requires_anchor_and_positive_odo(self):
+        # sem âncora parada não há sonda; a histerese segura o 1º ciclo
+        self.assertEqual(bc._moving_decision(False, 105.0), (True, False))
+        self.assertEqual(bc._moving_decision(False, 105.0), (False, False))
+        bc._last_still_odo = 100.0
+        self.assertEqual(bc._moving_decision(False, None), (False, False))
+        self.assertEqual(bc._moving_decision(False, 0.0), (False, False))
+        self.assertEqual(bc._moving_decision(False, 100.1), (False, False))
+        self.assertEqual(bc._moving_decision(False, 101.0), (True, True))
+
+    def test_semaphore_does_not_split_trip(self):
+        # polls a cada ~9 s (botão Atualizar martelado) + 2 ciclos parados de
+        # 20 s partiam a ida em 8 viagens; com o piso de 180 s o semáforo não
+        # fecha a viagem e o trajeto sai inteiro
+        for odo, ts, raw in [
+            (100.0, 1000, True),
+            (100.0, 1009, False), (100.0, 1018, False),   # semáforo
+            (100.0, 1030, True),                          # seguiu: mesma viagem
+            (105.0, 1500, True),
+            (105.0, 1520, False), (105.0, 1540, False),   # chegada
+            (105.0, 1900, False), (105.0, 2200, False),   # fecha (>180 s parado)
+        ]:
+            moving, sonda = bc._moving_decision(raw, odo)
+            bc._update_trip(self._snap(odo, ts), None, moving)
+            if sonda:
+                bc._last_still_odo = odo  # o loop consome após _update_trip
+        trips = self._trips()
+        self.assertEqual(len(trips), 1)
+        self.assertEqual((trips[0][0], trips[0][1]), (100.0, 105.0))
+
+    def test_micro_trip_same_place_discarded(self):
+        # 31/10 18:56: 1 km com início e fim dentro de casa — odômetro
+        # inteiro (+1) com o carro parado é ruído, não deslocamento
+        conn = sqlite3.connect(bc.DB_FILE)
+        try:
+            bc._insert_trip(conn, {
+                "start_ts": 1000, "end_ts": 2000,
+                "start_odo": 29492.0, "end_odo": 29493.0,
+                "soc_start": 56.0, "soc_end": 55.0,
+                "start_point": {"lat": -23.44250, "lon": -47.50091},
+                "end_point": {"lat": -23.44290, "lon": -47.50100},
+            })
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(len(self._trips()), 0)
+
+    def test_real_loop_around_home_survives(self):
+        # 5 km saindo e voltando pra casa é viagem de verdade (km ≥ 2)
+        conn = sqlite3.connect(bc.DB_FILE)
+        try:
+            bc._insert_trip(conn, {
+                "start_ts": 1000, "end_ts": 2000,
+                "start_odo": 29492.0, "end_odo": 29497.0,
+                "soc_start": 56.0, "soc_end": 55.0,
+                "start_point": {"lat": -23.44250, "lon": -47.50091},
+                "end_point": {"lat": -23.44290, "lon": -47.50100},
+            })
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(len(self._trips()), 1)
 
 
 class TestBydAnchorSoc(unittest.TestCase):
