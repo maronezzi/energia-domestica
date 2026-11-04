@@ -1256,6 +1256,10 @@ def _next_interval(snap: dict, moving: bool, cycles_since_moving: int = 0) -> fl
 
 async def _run_loop():
     global _reauth_state, _force_poll, _byd_loop
+    # âncoras paradas são escritas no consumo da sonda (abaixo) — sem o
+    # global, a atribuição as torna locais e a leitura estoura
+    # UnboundLocalError no 1º ciclo em que a sonda dispara
+    global _last_still_odo, _last_still_ts, _last_still_soc
     cfg = _load_cfg()
     backoff_k = 0
     err_count = 0

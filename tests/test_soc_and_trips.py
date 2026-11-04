@@ -320,5 +320,46 @@ class TestBydAnchorSoc(unittest.TestCase):
         self.assertIsNone(self.dash._byd_anchor_soc())
 
 
+class TestGlobalsDeclared(unittest.TestCase):
+    """Guarda estática (04/11/2026): _run_loop atribuía _last_still_odo/_ts/
+    _soc sem 'global' — viravam locais e a 1ª sonda estourou UnboundLocalError
+    (mesma família do _uuid shadowing de 30/10). Se qualquer função atribuir
+    estado compartilhado do poller, ela DEVE declará-lo global."""
+
+    # todo nome de estado de módulo escrito por mais de um contexto
+    SHARED = {
+        "_trip", "_trip_still", "_last_still_odo", "_last_still_ts",
+        "_last_still_soc", "_last_still_point", "_still_streak",
+        "_reauth_state", "_force_poll", "_byd_loop", "_byd_thread",
+    }
+
+    def test_no_assignment_without_global(self):
+        import ast
+        src = (PROJECT_ROOT / "src" / "byd_client.py").read_text()
+        tree = ast.parse(src)
+        bad = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            declared = {
+                gname
+                for stmt in node.body if isinstance(stmt, ast.Global)
+                for gname in stmt.names
+            }
+            for sub in ast.walk(node):
+                targets = []
+                if isinstance(sub, ast.Assign):
+                    targets = sub.targets
+                elif isinstance(sub, (ast.AugAssign, ast.AnnAssign)):
+                    targets = [sub.target]
+                elif isinstance(sub, ast.NamedExpr):
+                    targets = [sub.target]
+                for t in targets:
+                    if isinstance(t, ast.Name) and t.id in self.SHARED:
+                        if t.id not in declared:
+                            bad.append(f"{node.name}: {t.id}")
+        self.assertEqual(bad, [])
+
+
 if __name__ == "__main__":
     unittest.main()
