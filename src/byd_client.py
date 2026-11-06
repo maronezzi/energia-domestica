@@ -1225,6 +1225,18 @@ async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
             _i(getattr(rt, "tire_press_unit", None)) or 2, "psi"
         ),
     }
+    # envelope vazio da nuvem (carro dormindo/offline): data_ts=None e TODOS
+    # os numéricos viram sentinela 0 (soc=0, range=0, temp=0, charge=-1) —
+    # gravar isso desenhava um vale falso até o chão no gráfico de SOC e
+    # mostrava "0 km"/"0 °C" no status (188 linhas só em 06/11; pior em
+    # 02-05/11). data_ts None = a BYD não tem dado NENHUM do carro, então o
+    # zero aqui não é leitura (mesma regra da sentinela do odo_km). Só o 0 é
+    # descartado — leitura nonzero com data_ts None nunca foi vista e é
+    # preservada.
+    if snap["data_ts"] is None:
+        for k in ("soc", "range_ev", "range_total", "range_oil", "temp_in_car"):
+            if snap[k] == 0.0:
+                snap[k] = None
     moving = (snap["speed"] or 0.0) > 1.5
     every = GPS_EVERY_MOVING if moving else GPS_EVERY_STILL
     pos = None
