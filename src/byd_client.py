@@ -1245,6 +1245,20 @@ async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
     return snap, pos, moving
 
 
+def _display_pair(prev: dict | None, snap: dict) -> tuple[dict, float | None]:
+    """(snapshot, soc) para o PAINEL: envelope vazio (data_ts None, carro
+    dormindo) não substitui o último valor real — entre 15:52 e 15:58 de
+    06/11 o poll de 15:54 caiu no envelope e o SOC sumiu do dashboard por
+    ~4 min (o dono viá '—'/estimativa em vez do último valor lido). O DB
+    segue gravando o envelope (com NULLs); só o display retém o anterior.
+    data_age_s/soc_fresh derivam do snapshot retido, então envelhecem de
+    verdade: sem leitura real por >30 min o SOC cai fora por idade."""
+    if snap.get("data_ts") is None:
+        p = prev or {}
+        return p, p.get("soc")
+    return snap, snap.get("soc")
+
+
 def _dashboard_charging() -> bool:
     """O dashboard está com sessão de carga ativa? O BYD às vezes demora
     minutos para flipar is_charging após o plug (negociação do BMS) — nesse
@@ -1375,8 +1389,13 @@ async def _run_loop():
                             print(f"BYD: erro no diário de bordo: {e}")
                     gps_i += 1
                     with _lock:
+                        # display retém o último snapshot real quando o poll
+                        # cai no envelope vazio (ver _display_pair)
+                        disp_snap, disp_soc = _display_pair(
+                            _st["snapshot"], snap
+                        )
                         _st.update(
-                            soc=snap["soc"], snapshot=snap,
+                            soc=disp_soc, snapshot=disp_snap,
                             gps=pos or _st["gps"],
                             last_ok_ts=snap["ts"], last_error=save_err,
                             last_attempt_ts=snap["ts"],

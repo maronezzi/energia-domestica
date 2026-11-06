@@ -79,5 +79,32 @@ class TestEnvelope(unittest.TestCase):
         self.assertEqual(snap["temp_in_car"], 0.0)
 
 
+class TestDisplayPair(unittest.TestCase):
+    """O painel retém o último snapshot REAL quando o poll cai no envelope."""
+
+    def setUp(self):
+        import byd_client
+        self.b = byd_client
+
+    def test_envelope_retem_ultimo_valor_real(self):
+        prev = {"data_ts": 1793991120.0, "soc": 40.0, "range_ev": 26.0}
+        env = {"data_ts": None, "soc": None, "range_ev": None}
+        snap, soc = self.b._display_pair(prev, env)
+        self.assertIs(snap, prev)
+        self.assertEqual(soc, 40.0)  # último valor lido, não '—'
+
+    def test_leitura_real_substitui(self):
+        prev = {"data_ts": 1793991120.0, "soc": 40.0}
+        novo = {"data_ts": 1793991479.0, "soc": 39.0}
+        snap, soc = self.b._display_pair(prev, novo)
+        self.assertIs(snap, novo)
+        self.assertEqual(soc, 39.0)
+
+    def test_envelope_sem_anterior_nao_inventa_dado(self):
+        snap, soc = self.b._display_pair({}, {"data_ts": None, "soc": None})
+        self.assertEqual(snap, {})
+        self.assertIsNone(soc)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
