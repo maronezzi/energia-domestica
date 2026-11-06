@@ -3,7 +3,8 @@
 Coleta sob demanda do BYD ("Atualizar") + POST /api/refresh.
 
 - _sleep_or_force: o sleep do poller é interrompido pelo pedido (Event do
-  próprio loop, sinalizado via call_soon_threadsafe — sem executor).
+  próprio loop, sinalizado via call_soon_threadsafe — sem executor); o pedido
+  é CONSUMIDO (clear) — um clique = uma coleta, sem loop de 10 s.
 - request_poll_now: só quando o poller está VIVO; sem loop/não rodando →
   False honesto (a UI mostra o porquê no last_error da aba Carro).
 - POST /api/refresh: re-lê os dois medidores Tuya, pede o poll BYD e NÃO
@@ -66,6 +67,17 @@ class TestSleepOrForce(unittest.IsolatedAsyncioTestCase):
         forced = await self.b._sleep_or_force(30)
         self.assertTrue(forced)
         self.assertLess(time.monotonic() - t0, 5)
+
+    async def test_clique_consoma_o_evento_um_clique_uma_coleta(self):
+        # regressão 06/11: o Event nunca era limpo — 1 clique bastava para o
+        # _sleep_or_force devolver True para sempre, o poller virar um loop de
+        # ~10 s 24 h/dia e o carro nunca dormir (bateria caindo 1 %/4 h)
+        self.assertTrue(self.b.request_poll_now())
+        self.assertTrue(await self.b._sleep_or_force(30))  # 1ª: coleta imediata
+        self.assertFalse(self.b._force_poll.is_set())      # pedido consumido
+        t0 = time.monotonic()
+        self.assertFalse(await self.b._sleep_or_force(0.6))  # 2ª: espera normal
+        self.assertGreaterEqual(time.monotonic() - t0, 0.55)
 
 
 class TestRequestPollNow(unittest.TestCase):

@@ -99,6 +99,12 @@ async def _sleep_or_force(seconds: float) -> bool:
         return False
     try:
         await asyncio.wait_for(_force_poll.wait(), timeout=max(0.5, seconds))
+        # consome o pedido: um clique = UMA coleta imediata. Sem o clear o
+        # Event fica setado para sempre e todo sleep passa a devolver True na
+        # hora — o poller vira um loop de ~10 s 24 h/dia (8.044 polls em
+        # 05/11), a nuvem BYD acorda o T-Box a cada ciclo, o carro nunca entra
+        # em sleep e a bateria cai 1 %/4 h (dreno visto a partir de 03/11).
+        _force_poll.clear()
         return True
     except asyncio.TimeoutError:
         return False
