@@ -1237,6 +1237,10 @@ async def _collect(client, vin: str, gps_i: int, moving_prev: bool):
         "speed": _f(getattr(rt, "speed", None)),
         "charge_state": _i(getattr(rt, "charge_state", None)),
         "is_charging": bool(getattr(rt, "is_charging", False)),
+        # ATENÇÃO (06/11/2026, 48h de snapshots): is_charger_connected é flag
+        # de CONECTIVIDADE do T-Box, não de tomada — fica 1 acordado, até
+        # dirigindo (cs=15 & conn=1 a 58 km/h); 0 só quando o carro dorme
+        # (cs=-1). Tomada real = is_charging (cs=1). A UI não usa is_connected.
         "is_connected": bool(getattr(rt, "is_charger_connected", False)),
         "time_to_full_min": _i(getattr(rt, "time_to_full_minutes", None)),
         "temp_in_car": _f(getattr(rt, "temp_in_car", None)),

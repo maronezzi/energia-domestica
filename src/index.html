@@ -733,7 +733,7 @@ carro —</div></div></div>
                 <div>
                     <div class="si-label">Carregamento</div>
                     <div class="si-val" style="font-size:1.1rem" id="bydChargeState">—</div>
-                    <div class="si-sub" id="bydChargeSub">tomada: —</div>
+                    <div class="si-sub" id="bydChargeSub">—</div>
                 </div>
             </div>
             <div class="status-item">
@@ -1895,7 +1895,10 @@ function initBydChart() {
     });
 }
 
-const BYD_CHARGE_TXT = {1: '⚡ Carregando', 15: 'Na tomada'};
+const BYD_CHARGE_TXT = {1: '⚡ Carregando'};
+// Sem '15: Na tomada': 48h de snapshots provaram que cs=15 & is_connected=1
+// aparecem até dirigindo a 58 km/h — são flag de conectividade do T-Box,
+// não de tomada. Só is_charging é honesto.
 const BYD_TIRE_UNIT = {1: 'bar', 2: 'psi', 3: 'kPa'};
 
 function fmtAge(s) {
@@ -1949,11 +1952,11 @@ function renderByd(st, pts) {
     else if (st.at_home === false) ah.textContent = '🚗 Fora · ' + Math.round((st.home_dist_m || 0) / 100) / 10 + ' km de casa';
     else ah.textContent = '—';
 
-    // Carregamento
+    // Carregamento (só alegue tomada com carga real; ver BYD_CHARGE_TXT)
     document.getElementById('bydChargeState').textContent =
-        snap.is_charging ? BYD_CHARGE_TXT[1] : (BYD_CHARGE_TXT[snap.charge_state] || (snap.is_connected ? 'Na tomada' : 'Desconectada'));
+        snap.is_charging ? BYD_CHARGE_TXT[1] : (snap.speed > 0 ? '🚗 Em movimento' : '⏸ Parada');
     document.getElementById('bydChargeSub').textContent =
-        snap.time_to_full_min != null ? 'cheia em ' + fmtAge(snap.time_to_full_min * 60) : 'tomada: ' + (snap.is_connected ? 'sim' : 'não');
+        snap.is_charging && snap.time_to_full_min != null ? 'cheia em ' + fmtAge(snap.time_to_full_min * 60) : '—';
 
     // Autonomia (híbrido: EV separada do combustível)
     document.getElementById('bydRangeEv').textContent = snap.range_ev != null ? Math.round(snap.range_ev) : '—';
