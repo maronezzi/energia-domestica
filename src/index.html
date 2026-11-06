@@ -65,6 +65,8 @@
         .badge-green{background:rgba(34,197,94,.15);color:var(--ok)}
         .badge-amber{background:rgba(245,158,11,.15);color:var(--warn)}
         .badge-red{background:rgba(239,68,68,.18);color:var(--danger)}
+        /* Chip de período selecionado (cargas, rede, diário de bordo) */
+        .soc-preset.active{background:rgba(0,212,170,.15);border-color:var(--accent);color:var(--accent);font-weight:600}
         /* Manutenção preventiva: barra do ciclo + chips de probabilidade */
         .mnt-track{position:relative;height:14px;background:var(--bg2);border-radius:7px;margin:.9rem 0 .35rem}
         .mnt-win{position:absolute;top:0;bottom:0;background:rgba(245,158,11,.22)}
@@ -895,17 +897,25 @@ carro —</div></div></div>
         <div class="card" style="margin-top:1rem">
             <h2>🧭 Diário de Bordo <span class="badge badge-blue" id="bydAtHome">—</span></h2>
             <div style="display:flex;gap:.5rem;align-items:center;margin:.8rem 0 .5rem;flex-wrap:wrap">
-                <button class="soc-preset" onclick="bydShiftDay(-1)">◀</button>
+                <button class="soc-preset" onclick="bydShift(-1)">◀</button>
                 <button class="soc-preset" id="bydDayLabel">—</button>
-                <button class="soc-preset" onclick="bydShiftDay(1)">▶</button>
-                <button class="soc-preset" onclick="bydGoToday()">Hoje</button>
+                <button class="soc-preset" onclick="bydShift(1)">▶</button>
+                <button class="soc-preset" data-dp="day" onclick="bydPreset('day')">Hoje</button>
+                <button class="soc-preset" data-dp="7d" onclick="bydPreset('7d')">7 dias</button>
+                <button class="soc-preset" data-dp="30d" onclick="bydPreset('30d')">30 dias</button>
+                <button class="soc-preset" data-dp="month" onclick="bydPreset('month')">Este mês</button>
+                <button class="soc-preset" data-dp="lmonth" onclick="bydPreset('lmonth')">Mês anterior</button>
+                <input type="date" id="bydFrom" aria-label="Início do intervalo" style="background:transparent;border:1px solid rgba(255,255,255,.14);border-radius:6px;color:var(--text);padding:.25rem .35rem;color-scheme:dark;font-size:.85rem">
+                <span style="color:var(--dim)">–</span>
+                <input type="date" id="bydTo" aria-label="Fim do intervalo" style="background:transparent;border:1px solid rgba(255,255,255,.14);border-radius:6px;color:var(--text);padding:.25rem .35rem;color-scheme:dark;font-size:.85rem">
+                <button class="soc-preset" onclick="bydPresetCustom()">Ver intervalo</button>
                 <span style="margin-left:auto;color:var(--dim);font-size:.8rem" id="bydDayNote"></span>
             </div>
             <div class="charge-summary" style="margin:.5rem 0">
-                <div class="cs-card"><div class="cs-card-lbl">Km no dia</div><div class="cs-card-val" id="bydDayKm">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl" id="bydLblKm">Km no dia</div><div class="cs-card-val" id="bydDayKm">—</div></div>
                 <div class="cs-card"><div class="cs-card-lbl">Viagens</div><div class="cs-card-val" id="bydDayTrips">—</div></div>
                 <div class="cs-card"><div class="cs-card-lbl">Dirigindo</div><div class="cs-card-val" id="bydDayHours">—</div></div>
-                <div class="cs-card"><div class="cs-card-lbl" title="Estimado pela queda real de SOC (ΔSOC × bateria)">kWh EV no dia</div><div class="cs-card-val" id="bydDayKwh">—</div></div>
+                <div class="cs-card"><div class="cs-card-lbl" id="bydLblKwh" title="Estimado pela queda real de SOC (ΔSOC × bateria)">kWh EV no dia</div><div class="cs-card-val" id="bydDayKwh">—</div></div>
                 <div class="cs-card"><div class="cs-card-lbl">kWh na tomada</div><div class="cs-card-val" id="bydDayHomeKwh">—</div></div>
                 <div class="cs-card"><div class="cs-card-lbl">Custo tomada</div><div class="cs-card-val" style="color:var(--ok)" id="bydDayCost">—</div></div>
             </div>
@@ -929,7 +939,7 @@ carro —</div></div></div>
                 <canvas id="chartBydDaily"></canvas>
             </div>
             <div style="color:var(--dim);font-size:.9rem;margin-top:.4rem">
-                Últimos 14 dias: barras = km rodados (medidos pelo ODÔMETRO do carro — a fonte confiável) · linha = km/kWh elétrico (ΔSOC × bateria; quanto maior, melhor). A "casa" é aprendida automaticamente das posições do carro; viagens com ≥ 0,2 km.
+                No intervalo selecionado (padrão: últimos 14 dias): barras = km rodados (medidos pelo ODÔMETRO do carro — a fonte confiável) · linha = km/kWh elétrico (ΔSOC × bateria; quanto maior, melhor). A "casa" é aprendida automaticamente das posições do carro; viagens com ≥ 0,2 km.
             </div>
         </div>
     </div>
@@ -2012,7 +2022,8 @@ function renderByd(st, pts) {
 }
 
 // ─── Diário de Bordo (fase 2) ────────────────────────────────
-let bydDay = null;        // null = hoje ao vivo (mesmo padrão do hourlyViewDate)
+let bydDay = null;        // modo dia: null = hoje ao vivo (mesmo padrão do hourlyViewDate)
+let bydRange = null;      // modo intervalo: {from, to, preset} — preset ∈ {'7d','30d','month','lmonth','custom'}
 let cBydDaily;
 let bydMap = null, bydMapLayer = null;
 
@@ -2035,13 +2046,77 @@ function initBydDailyChart() {
 
 function bydCurrentDay() { return bydDay || todayLocalStr(); }
 
-function bydShiftDay(delta) {
-    const next = shiftDayStr(bydCurrentDay(), delta);
-    bydDay = (next >= todayLocalStr()) ? null : next;  // hoje volta ao modo ao vivo
+function bydMonthStart(s) { return s.slice(0, 8) + '01'; }
+
+function bydMonthEnd(s) {
+    const [y, m] = s.split('-').map(Number);
+    const last = new Date(y, m, 0).getDate();
+    return `${y}-${String(m).padStart(2,'0')}-${String(last).padStart(2,'0')}`;
+}
+
+function bydShiftMonth(s, delta) {
+    // ±N meses preservando o dia (31/03 −1 mês = 28/02, não estoura)
+    const [y, m, d] = s.split('-').map(Number);
+    const dt = new Date(y, m - 1 + delta, 1);
+    const last = new Date(dt.getFullYear(), dt.getMonth() + 1, 0).getDate();
+    dt.setDate(Math.min(d, last));
+    return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+}
+
+function bydPreset(kind) {
+    if (kind === 'day') { bydDay = null; bydRange = null; loadBydDiario(); return; }
+    const hoje = todayLocalStr();
+    if (kind === '7d') bydRange = {from: shiftDayStr(hoje, -6), to: hoje, preset: '7d'};
+    else if (kind === '30d') bydRange = {from: shiftDayStr(hoje, -29), to: hoje, preset: '30d'};
+    else if (kind === 'month') bydRange = {from: bydMonthStart(hoje), to: hoje, preset: 'month'};
+    else if (kind === 'lmonth') {
+        const m = bydShiftMonth(hoje, -1);
+        bydRange = {from: bydMonthStart(m), to: bydMonthEnd(m), preset: 'lmonth'};
+    }
     loadBydDiario();
 }
 
-function bydGoToday() { bydDay = null; loadBydDiario(); }
+function bydPresetCustom() {
+    let from = document.getElementById('bydFrom').value;
+    let to = document.getElementById('bydTo').value;
+    if (!from || !to) return;  // datas incompletas: não dispara busca
+    if (from > to) { const t = from; from = to; to = t; }
+    const hoje = todayLocalStr();
+    if (to > hoje) to = hoje;                       // sem futuro
+    if (from > to) from = to;
+    if (Math.round((Date.parse(to) - Date.parse(from)) / 864e5) + 1 > 92) {
+        from = shiftDayStr(to, -91);                // mesmo teto do backend
+    }
+    document.getElementById('bydFrom').value = from;
+    document.getElementById('bydTo').value = to;
+    bydRange = {from, to, preset: 'custom'};
+    loadBydDiario();
+}
+
+function bydShift(delta) {
+    if (!bydRange) {
+        const next = shiftDayStr(bydCurrentDay(), delta);
+        bydDay = (next >= todayLocalStr()) ? null : next;  // hoje volta ao modo ao vivo
+    } else {
+        const hoje = todayLocalStr();
+        let from, to;
+        if (bydRange.preset === 'month' || bydRange.preset === 'lmonth') {
+            from = bydShiftMonth(bydRange.from, delta);
+            to = bydMonthEnd(from);
+        } else {
+            const len = Math.round((Date.parse(bydRange.to) - Date.parse(bydRange.from)) / 864e5) + 1;
+            from = shiftDayStr(bydRange.from, delta * len);
+            to = shiftDayStr(bydRange.to, delta * len);
+        }
+        if (from > hoje) return;            // janela cairia no futuro: não move
+        if (to > hoje) to = hoje;           // sem futuro
+        // janela deslocada vira intervalo livre (os presets ficam ancorados em hoje)
+        bydRange = {from, to, preset: (bydRange.preset === '7d' || bydRange.preset === '30d') ? 'custom' : bydRange.preset};
+    }
+    loadBydDiario();
+}
+
+function bydGoToday() { bydDay = null; bydRange = null; loadBydDiario(); }
 
 // ─── Manutenção preventiva (docs/ESTUDO_PREVISAO_MANUTENCAO.md) ───
 
@@ -2228,13 +2303,17 @@ document.getElementById('mntBtnSalvar').addEventListener('click', salvarManutenc
 
 async function loadBydDiario() {
     const day = bydCurrentDay();
+    const rng = bydRange;
     try {
         const [posR, tripsR, dailyR] = await Promise.all([
-            fetch('/api/byd/positions?date=' + day).then(r => r.json()),
-            fetch('/api/byd/trips?date=' + day).then(r => r.json()),
-            fetch('/api/byd/daily?days=14').then(r => r.json())
+            fetch(rng ? '/api/byd/positions?start=' + rng.from + '&end=' + rng.to
+                      : '/api/byd/positions?date=' + day).then(r => r.json()),
+            fetch(rng ? '/api/byd/trips?start=' + rng.from + '&end=' + rng.to
+                      : '/api/byd/trips?date=' + day).then(r => r.json()),
+            fetch(rng ? '/api/byd/daily?start=' + rng.from + '&end=' + rng.to
+                      : '/api/byd/daily?days=14').then(r => r.json())
         ]);
-        renderBydDiario(day, posR.positions || [], tripsR.trips || [], dailyR);
+        renderBydDiario(rng, day, posR.positions || [], tripsR.trips || [], dailyR);
     } catch (e) { /* diário é best-effort; não derruba a aba */ }
 }
 
@@ -2255,22 +2334,35 @@ function bydHomeDistKm(lat, lon) {
     return R * 2 * Math.asin(Math.sqrt(a));
 }
 
-function renderBydDiario(day, positions, trips, daily) {
-    document.getElementById('bydDayLabel').textContent = fmtBR(day);
-    const isToday = day === todayLocalStr();
+function renderBydDiario(rng, day, positions, trips, daily) {
+    const label = document.getElementById('bydDayLabel');
+    label.textContent = rng ? (fmtBR(rng.from) + ' – ' + fmtBR(rng.to)) : fmtBR(day);
+    const isToday = !rng && day === todayLocalStr();
     document.getElementById('bydDayNote').textContent = isToday ? 'hoje ao vivo' : '';
 
-    // stats do dia
-    const d = (daily.days || []).find(x => x.date === day) || {};
+    // chip ativo (mesmo padrão dos períodos de cargas/rede)
+    document.querySelectorAll('#tab-byd [data-dp]').forEach(b =>
+        b.classList.toggle('active', rng ? b.dataset.dp === rng.preset : b.dataset.dp === 'day'));
+
+    // stats: dia único ou agregado do intervalo (linhas diárias do servidor)
+    const rows = (daily.days || []).filter(x => !rng || (x.date >= rng.from && x.date <= rng.to));
+    const agg = {km: 0, trips: 0, hours: 0, kwh_ev: 0, kwh_home: 0, cost_home: 0};
+    for (const x of rows) {
+        agg.km += x.km || 0; agg.trips += x.trips || 0; agg.hours += x.hours || 0;
+        agg.kwh_ev += x.kwh_ev || 0; agg.kwh_home += x.kwh_home || 0; agg.cost_home += x.cost_home || 0;
+    }
+    const d = rng ? agg : (rows.find(x => x.date === day) || {});
+    document.getElementById('bydLblKm').textContent = rng ? 'Km no período' : 'Km no dia';
+    document.getElementById('bydLblKwh').textContent = rng ? 'kWh EV no período' : 'kWh EV no dia';
     document.getElementById('bydDayKm').textContent = (d.km || 0).toLocaleString('pt-BR') + ' km';
-    document.getElementById('bydDayTrips').textContent = d.trips ?? 0;
+    document.getElementById('bydDayTrips').textContent = Math.round(d.trips ?? 0);
     document.getElementById('bydDayHours').textContent = (d.hours || 0) > 0 ? d.hours.toFixed(1) + ' h' : '—';
     document.getElementById('bydDayKwh').textContent = (d.kwh_ev || 0) > 0 ? d.kwh_ev.toFixed(1) + ' kWh' : '—';
     document.getElementById('bydDayHomeKwh').textContent = (d.kwh_home || 0) > 0 ? d.kwh_home.toFixed(2) + ' kWh' : '—';
     document.getElementById('bydDayCost').textContent = (d.cost_home || 0) > 0 ? fmtR(d.cost_home) : '—';
 
-    // gráfico 14 dias
-    const days = daily.days || [];
+    // gráfico (dia: últimos 14 dias · intervalo: exatamente a janela)
+    const days = rows;
     cBydDaily.data.labels = days.map(x => x.date.slice(8) + '/' + x.date.slice(5, 7));
     cBydDaily.data.datasets[0].data = days.map(x => x.km);
     // km/kWh (medida do povo): inverso do kWh/100km — quanto maior, melhor
@@ -2288,7 +2380,7 @@ function renderBydDiario(day, positions, trips, daily) {
     const pts = positions.filter(p => p.lat != null && p.lon != null).map(p => [p.lat, p.lon]);
     if (pts.length) {
         if (pts.length > 1) L.polyline(pts, {color: '#3b82f6', weight: 3, opacity: .8}).addTo(bydMapLayer);
-        L.circleMarker(pts[0], {radius: 6, color: '#00d4aa', fillColor: '#00d4aa', fillOpacity: 1}).bindPopup('Início do dia').addTo(bydMapLayer);
+        L.circleMarker(pts[0], {radius: 6, color: '#00d4aa', fillColor: '#00d4aa', fillOpacity: 1}).bindPopup(rng ? 'Início do período' : 'Início do dia').addTo(bydMapLayer);
         L.circleMarker(pts[pts.length - 1], {radius: 6, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 1}).bindPopup('Última posição').addTo(bydMapLayer);
         bydMap.fitBounds(L.latLngBounds(pts).pad(0.35));
         if (pts.length === 1) bydMap.setZoom(15);
@@ -2300,10 +2392,12 @@ function renderBydDiario(day, positions, trips, daily) {
     const tb = document.getElementById('bydTripsTbody');
     if (!trips.length) {
         tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:1.2rem">' +
-            (isToday ? 'Nenhuma viagem hoje (ainda).' : 'Nenhuma viagem neste dia.') + '</td></tr>';
+            (isToday ? 'Nenhuma viagem hoje (ainda).' : rng ? 'Nenhuma viagem neste período.' : 'Nenhuma viagem neste dia.') + '</td></tr>';
     } else {
         tb.innerHTML = trips.map(t => {
-            const ini = new Date(t.start_ts * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
+            const dt = new Date(t.start_ts * 1000);
+            const ini = (rng ? dt.toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit'}) + ' ' : '') +
+                dt.toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
             const fim = new Date(t.end_ts * 1000).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
             const dur = Math.max(1, Math.round((t.end_ts - t.start_ts) / 60));
             const soc = (t.soc_start != null && t.soc_end != null) ? Math.round(t.soc_start) + '% → ' + Math.round(t.soc_end) + '%' : '—';

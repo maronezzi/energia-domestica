@@ -4073,34 +4073,59 @@ def _brt_today() -> str:
     return (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d")
 
 
+_DIARIO_MAX_DAYS = 92  # teto do intervalo do diário (idem janela do /daily)
+_POS_MAP_CAP = 3000    # pontos no mapa antes de decimar (Leaflet no celular)
+
+
+def _diario_bounds(date: str = None, start: str = None, end: str = None):
+    """Valida o filtro do diário de bordo: um dia (date) OU um intervalo
+    (start/end, BRT inclusive, até 92 dias). Devolve (d1, d2) inclusivos.
+    Levanta 400 em formato inválido, intervalo invertido ou estourado."""
+    if start or end:
+        if not (start and end):
+            raise HTTPException(status_code=400, detail="start e end devem vir juntos")
+        try:
+            d1 = datetime.strptime(start, "%Y-%m-%d")
+            d2 = datetime.strptime(end, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="start/end devem ser YYYY-MM-DD")
+        if d1 > d2:
+            raise HTTPException(status_code=400, detail="start deve ser ≤ end")
+        if (d2 - d1).days >= _DIARIO_MAX_DAYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"intervalo máximo de {_DIARIO_MAX_DAYS} dias",
+            )
+        return start, end
+    if date is None:
+        date = _brt_today()
+    else:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date deve ser YYYY-MM-DD")
+    return date, date
+
+
 @app.get("/api/byd/positions")
-def api_byd_positions(date: str = None):
-    """Posições de um dia local (date='YYYY-MM-DD' BRT; default: hoje)."""
-    if date is None:
-        date = _brt_today()
-    else:
-        try:
-            datetime.strptime(date, "%Y-%m-%d")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="date deve ser YYYY-MM-DD")
-    return {"date": date, "positions": byd_client.positions_for_day(date)}
+def api_byd_positions(date: str = None, start: str = None, end: str = None):
+    """Posições de um dia local (date='YYYY-MM-DD' BRT; default: hoje) ou de
+    um intervalo (start/end BRT inclusive) para o mapa do diário de bordo."""
+    d1, d2 = _diario_bounds(date, start, end)
+    positions = byd_client.positions_for_range(d1, d2)
+    # intervalo longo pode ter milhares de pontos: decima uniformemente
+    # (1ª e última sempre ficam — são os marcadores de início/fim do trajeto)
+    if len(positions) > _POS_MAP_CAP:
+        step = (len(positions) - 1) / (_POS_MAP_CAP - 1)
+        positions = [positions[round(i * step)] for i in range(_POS_MAP_CAP)]
+    return {"date": d1, "start": d1, "end": d2, "positions": positions}
 
 
-@app.get("/api/byd/trips")
-def api_byd_trips(date: str = None):
-    """Viagens derivadas de um dia local (date='YYYY-MM-DD' BRT; default: hoje)
-    com custo estimado por viagem: energia (ΔSOC ÷ η × tarifa — o que custa
-    repor na tomada) e combustível SOMENTE quando os km excedem o que a bateria
-    explica (DM-i urbano em EV não queima gasolina; o motor a combustão entra
-    quando a viagem pede mais do que a bateria dá)."""
-    if date is None:
-        date = _brt_today()
-    else:
-        try:
-            datetime.strptime(date, "%Y-%m-%d")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="date deve ser YYYY-MM-DD")
-    trips = byd_client.trips_for_day(date)
+def _enrich_trips_costs(trips: list) -> None:
+    """Custo estimado por viagem (no lugar): energia (ΔSOC ÷ η × tarifa — o
+    que custa repor na tomada) e combustível SOMENTE quando os km excedem o
+    que a bateria explica (DM-i urbano em EV não queima gasolina; o motor a
+    combustão entra quando a viagem pede mais do que a bateria dá)."""
     cfg = load_config()
     kwh_cost = cfg.get("kwh_cost", 0.956)
     battery = float(cfg.get("car_battery_kwh") or 12.9)
@@ -4146,7 +4171,18 @@ def api_byd_trips(date: str = None):
         t["cost_fuel"] = (
             round(liters * last_fuel_price, 2) if (liters and last_fuel_price) else 0.0
         )
-    return {"date": date, "trips": trips}
+
+
+@app.get("/api/byd/trips")
+def api_byd_trips(date: str = None, start: str = None, end: str = None):
+    """Viagens de um dia local (date='YYYY-MM-DD' BRT; default: hoje) ou de
+    um intervalo (start/end BRT inclusive), com custo estimado por viagem:
+    energia (ΔSOC ÷ η × tarifa — o que custa repor na tomada) e combustível
+    SOMENTE quando os km excedem o que a bateria explica."""
+    d1, d2 = _diario_bounds(date, start, end)
+    trips = byd_client.trips_for_range(d1, d2)
+    _enrich_trips_costs(trips)
+    return {"date": d1, "start": d1, "end": d2, "trips": trips}
 
 
 @app.get("/api/byd/fuel")
@@ -4432,13 +4468,30 @@ def api_byd_monthly(months: int = 3):
 
 
 @app.get("/api/byd/daily")
-def api_byd_daily(days: int = 14):
+def api_byd_daily(days: int = 14, start: str = None, end: str = None):
     """Resumo diário: km, viagens, kWh EV estimados (ΔSOC), kWh/R$ da tomada
-    (charge_sessions) — últimos N dias locais (BRT)."""
-    days = max(1, min(days, 90))
-    byd = byd_client.daily_trips(days)
+    (charge_sessions) — últimos N dias locais (BRT) ou o intervalo start/end."""
     cost = load_config().get("kwh_cost", 0.956)
-    since = (datetime.utcnow() - timedelta(hours=3) - timedelta(days=days)).isoformat()
+    if start or end:
+        d1, d2 = _diario_bounds(None, start, end)
+        byd = byd_client.daily_trips_between(d1, d2)
+        day_list = []
+        cur = datetime.strptime(d1, "%Y-%m-%d")
+        d2dt = datetime.strptime(d2, "%Y-%m-%d")
+        while cur <= d2dt:
+            day_list.append(cur.strftime("%Y-%m-%d"))
+            cur += timedelta(days=1)
+        since = d1 + "T00:00:00"  # start_time do SQLite é BRT local
+    else:
+        days = max(1, min(days, 90))
+        byd = byd_client.daily_trips(days)
+        day_list = [
+            (datetime.utcnow() - timedelta(hours=3) - timedelta(days=i)).strftime(
+                "%Y-%m-%d"
+            )
+            for i in range(days - 1, -1, -1)
+        ]
+        since = (datetime.utcnow() - timedelta(hours=3) - timedelta(days=days)).isoformat()
     conn = get_db()
     try:
         rows = conn.execute(
@@ -4452,10 +4505,7 @@ def api_byd_daily(days: int = 14):
         conn.close()
     home_kwh = {r[0]: (r[1] or 0.0, r[2] or 0.0) for r in rows}
     out = []
-    for i in range(days - 1, -1, -1):
-        day = (datetime.utcnow() - timedelta(hours=3) - timedelta(days=i)).strftime(
-            "%Y-%m-%d"
-        )
+    for day in day_list:
         t = byd.get(day, {})
         hk, hcost = home_kwh.get(day, (0.0, 0.0))
         out.append(

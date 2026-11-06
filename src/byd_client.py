@@ -757,9 +757,11 @@ def history(hours: int = 24) -> list[dict]:
     ]
 
 
-def positions_for_day(date_str: str) -> list[dict]:
-    """Posições de um dia local (BRT), para o mapa do diário de bordo."""
-    start, end = _brt_day_bounds(date_str)
+def positions_for_range(start_str: str, end_str: str) -> list[dict]:
+    """Posições entre dois dias locais (BRT, inclusive) — mapa do diário de
+    bordo no modo intervalo."""
+    start, _ = _brt_day_bounds(start_str)
+    _, end = _brt_day_bounds(end_str)
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         rows = conn.execute(
@@ -779,8 +781,16 @@ def positions_for_day(date_str: str) -> list[dict]:
     ]
 
 
-def trips_for_day(date_str: str) -> list[dict]:
-    start, end = _brt_day_bounds(date_str)
+def positions_for_day(date_str: str) -> list[dict]:
+    """Posições de um dia local (BRT), para o mapa do diário de bordo."""
+    return positions_for_range(date_str, date_str)
+
+
+def trips_for_range(start_str: str, end_str: str) -> list[dict]:
+    """Viagens entre dois dias locais (BRT, inclusive) — tabela do diário de
+    bordo no modo intervalo."""
+    start, _ = _brt_day_bounds(start_str)
+    _, end = _brt_day_bounds(end_str)
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         rows = conn.execute(
@@ -807,20 +817,30 @@ def trips_for_day(date_str: str) -> list[dict]:
     return out
 
 
+def trips_for_day(date_str: str) -> list[dict]:
+    """Viagens derivadas de um dia local (BRT)."""
+    return trips_for_range(date_str, date_str)
+
+
 def _odo_series(days_back: int) -> dict:
-    """Séries por dia/mês local (BRT) a partir de byd_snapshots: primeiro e
-    último ODÔMETRO VÁLIDO do período (odo_km = 0 é sentinela da BYD e é
-    descartado — viu-se em 19/10 e 22/10) e kWh EV = soma dos ΔSOC negativos
-    entre pares consecutivos COM o odômetro avançando (dreno fantasma de SOC
-    parado, tipo 30→26 na garagem, não é condução e não entra)."""
     since = time.time() - days_back * 86400
+    return _odo_series_between(since, time.time())
+
+
+def _odo_series_between(start_ts: float, end_ts: float) -> dict:
+    """Séries por dia local (BRT) a partir de byd_snapshots entre dois epochs:
+    primeiro e último ODÔMETRO VÁLIDO do período (odo_km = 0 é sentinela da
+    BYD e é descartado — viu-se em 19/10 e 22/10) e kWh EV = soma dos ΔSOC
+    negativos entre pares consecutivos COM o odômetro avançando (dreno
+    fantasma de SOC parado, tipo 30→26 na garagem, não é condução e não
+    entra)."""
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         rows = conn.execute(
             "SELECT ts, odo_km, soc FROM byd_snapshots "
-            "WHERE ts >= ? AND odo_km IS NOT NULL AND odo_km > 0 "
+            "WHERE ts >= ? AND ts < ? AND odo_km IS NOT NULL AND odo_km > 0 "
             "ORDER BY ts",
-            (since,),
+            (start_ts, end_ts),
         ).fetchall()
         conn.close()
     except sqlite3.OperationalError:
@@ -849,14 +869,25 @@ def daily_trips(days: int = 14) -> dict:
     """Por dia local (BRT): km rodados medidos pelo ODÔMETRO do carro (a
     verdade — a soma de viagens por janelas de movimento perde trechos entre
     polls), kWh EV estimado (ΔSOC só quando o odômetro avança) e contagem/
-    duração de viagens (de byd_trips)."""
+    duração de viagens (de byd_trips). Janela: últimos N dias."""
     days = max(1, min(int(days), 90))
-    odo = _odo_series(days)
+    return daily_trips_between(
+        _brt_day(time.time() - days * 86400), _brt_day(time.time())
+    )
+
+
+def daily_trips_between(start_str: str, end_str: str) -> dict:
+    """Mesma série do daily_trips, porém num intervalo local (BRT,
+    inclusive) — alimenta o diário de bordo no modo intervalo."""
+    start, _ = _brt_day_bounds(start_str)
+    _, end = _brt_day_bounds(end_str)
+    odo = _odo_series_between(start, end)
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         rows = conn.execute(
-            "SELECT start_ts, end_ts FROM byd_trips WHERE start_ts >= ?",
-            (time.time() - days * 86400,),
+            "SELECT start_ts, end_ts FROM byd_trips "
+            "WHERE start_ts >= ? AND start_ts < ?",
+            (start, end),
         ).fetchall()
         conn.close()
     except sqlite3.OperationalError:
